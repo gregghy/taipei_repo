@@ -1,0 +1,15 @@
+mpm_project/
+│
+├── config.py          # Global parameters and simulation settings
+├── core/
+│   ├── particles.py   # Particle data structure (Taichi fields)
+│   └── grid.py        # Grid data structure (Taichi fields)
+│
+├── physics/
+│   ├── materials.py   # Constitutive models (Water, Neo-Hookean, etc.)
+│   └── boundary.py    # Collision objects and grid boundary conditions
+│
+├── solver/
+│   └── mpm_step.py    # The core MPM loop (P2G, Grid Update, G2P)
+│
+└── main.py            # Scene setup, GUI window, and execution loop

@@ -1,0 +1,12 @@
+# Python cache
+__pycache__/
+*.pyc
+.venv/
+
+# Simulation output files
+*.vtk
+
+# Large media files
+*.mp4
+*.m4v
+*.avi

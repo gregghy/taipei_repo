@@ -1,0 +1,27 @@
+
+
+##   3D MPM CODE INPUT FILE 1  ## 
+
+
+
+Section 2. Material Model (Choose below)                  -- 4
+
+     1. Linear Elastic                   
+     2. Hyperelastic
+     3. Rigid Body 
+     4. Elasto-plastic
+
+Section 3.   Material Parameters 
+
+     1.  Young's Modulus (E)                              --  10000
+     2.  Poisson's Ratio (nu)                             --  0.3
+     3.  Density (rho)                                    --  1
+     4.  Yield Stress                                     --  8
+     5.  Linear Hardening Modulus                         --  0
+
+Section 4.  Problem Setting
+
+     1.  Gravity                                          --  10.0
+     2.  Initial 'x' Velocity                             --  0.0
+     3.  Initial 'y' Velocity                             --  0.0
+     4.  Initial 'z' Velocity                             --  0.0

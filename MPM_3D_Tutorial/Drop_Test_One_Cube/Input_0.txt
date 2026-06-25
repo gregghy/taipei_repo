@@ -1,0 +1,56 @@
+
+
+##   3D MPM CODE INPUT FILE 0  ## 
+
+
+
+Section 0.  Basic Settings
+
+     1.  Mesh File Name                                   --  [CubeMesh.msh]
+     2.  Animation Framerate (frames/s)                   --  15
+     3.  Animation Length (s)                             --  5
+
+Section 1.  Numerical Setting
+
+     1.  Grid Node Number (1D)                            --  61
+     2.  Grid Dimension (1D)                              --  1.0
+     3.  Timestep (dt)                                    --  0.0001
+     4.  Total Simulation Time (T)                        --  0.40
+
+Section 2. Material Model (Choose below)                  -- 1
+
+     1. Linear Elastic                   
+     2. Hyperelastic
+     3. Rigid Body 
+     4. Elasto-plastic
+
+Section 3.   Material Parameters 
+
+     1.  Young's Modulus (E)                              --  500
+     2.  Poisson's Ratio (nu)                             --  0.3
+     3.  Density (rho)                                    --  1
+     4.  Yield Stress                                     --  0
+     5.  Linear Hardening Modulus                         --  0
+
+Section 4.  Problem Setting
+
+     1.  Gravity                                          --  10.0
+     2.  Initial 'x' Velocity                             --  0.0
+     3.  Initial 'y' Velocity                             --  0.0
+     4.  Initial 'z' Velocity                             --  0.0
+
+Section 5.   Particle Update Methods (Choose below)       --  3
+
+     1.  Affine Particle-In-Cell (APIC) 
+     2.  Particle-in-Cell (PIC)
+     3.  Fluid Implicit Particle (FLIP)                   -- 1.0
+
+Section 6.   Stabilization Techniques
+
+     1.  Pressure Stabilization                           --  0
+
+Section 7. Fixed Boundary                                 --  [~]
+
+Section 8. Displacement Boundary                          --  [~]
+
+     1. Displacement Surface Velocity                     --  {~}

@@ -1,0 +1,55 @@
+
+
+##   3D MPM CODE INPUT FILE 0  ## 
+
+
+
+Section 0.  Basic Settings
+     1.  Mesh File Name                                   --  [BottomCube.msh, TopCube.msh]
+     2.  Animation Framerate (frames/s)                   --  5
+     3.  Animation Length (s)                             --  5
+
+Section 1.  Numerical Setting
+
+     1.  Grid Node Number (1D)                            --  25
+     2.  Grid Dimension (1D)                              --  1.0
+     3.  Timestep (dt)                                    --  0.0001
+     4.  Total Simulation Time (T)                        --  1.0
+
+Section 2. Material Model (Choose below)                  -- 2
+
+     1. Linear Elastic                   
+     2. Hyperelastic
+     3. Rigid Body 
+     4. Elasto-plastic
+
+Section 3.   Material Parameters 
+
+     1.  Young's Modulus (E)                              --  2000
+     2.  Poisson's Ratio (nu)                             --  0.49
+     3.  Density (rho)                                    --  1
+     4.  Yield Stress                                     --  0
+     5.  Linear Hardening Modulus                         --  0
+
+Section 4.  Problem Setting
+
+     1.  Gravity                                          --  0.0
+     2.  Initial 'x' Velocity                             --  0.0
+     3.  Initial 'y' Velocity                             --  0.0
+     4.  Initial 'z' Velocity                             --  0.0
+
+Section 5.   Particle Update Methods (Choose below)       --  1
+
+     1.  Affine Particle-In-Cell (APIC) 
+     2.  Particle-in-Cell (PIC)
+     3.  Fluid Implicit Particle (FLIP)                   -- 0.99
+
+Section 6.   Stabilization Techniques
+
+     1.  Pressure Stabilization                           --  1
+
+Section 7. Fixed Boundary                                 --  [1, 2, 3, 4, 5]
+
+Section 8. Displacement Boundary                          --  [~]
+
+     1. Displacement Surface Velocity                     --  {~}
