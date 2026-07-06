@@ -29,9 +29,14 @@ def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     
     if config.ACTIVE_SCENARIO == "DAM_BREAK":
-        from solver.standard_engine import StandardSolver
-        solver = StandardSolver()
-        output_directory = os.path.join(base_dir, 'hydrostatic_2D')
+        if getattr(config, 'USE_ADAPTIVE_MPM', False) and config.DIM == 2:
+            from solver.adaptive_engine import AdaptiveMPMSolver2D
+            solver = AdaptiveMPMSolver2D()
+            output_directory = os.path.join(base_dir, 'hydrostatic_2D_adaptive')
+        else:
+            from solver.standard_engine import StandardSolver
+            solver = StandardSolver()
+            output_directory = os.path.join(base_dir, 'hydrostatic_2D')
         
     elif config.ACTIVE_SCENARIO == "POISEUILLE":
         from solver.Poiseuille_engine import PoiseuilleSolver
@@ -44,9 +49,18 @@ def main():
         output_directory = os.path.join(base_dir, 'inflow_result')
         
     elif config.ACTIVE_SCENARIO == "IMMERSED":
-        from solver.standard_engine import StandardSolver
-        solver = StandardSolver()
-        output_directory = os.path.join(base_dir, f'vppcase_immersed_{dim_case}D')
+        if getattr(config, 'USE_ADAPTIVE_MPM', False) and config.DIM == 2:
+            from solver.adaptive_engine import AdaptiveMPMSolver2D
+            solver = AdaptiveMPMSolver2D()
+            output_directory = os.path.join(base_dir, f'vppcase_immersed_{dim_case}D_adaptive')
+        else:
+            from solver.standard_engine import StandardSolver
+            solver = StandardSolver()
+            output_directory = os.path.join(base_dir, f'vppcase_immersed_{dim_case}D')
+    elif config.ACTIVE_SCENARIO == "ADAPTIVE_MPM":
+        from solver.adaptive_engine import AdaptiveMPMSolver2D
+        solver = AdaptiveMPMSolver2D()
+        output_directory = os.path.join(base_dir, 'adaptive_mpm')
     else:
         raise ValueError("Unknown scenario!")
 
@@ -125,9 +139,11 @@ def main():
         DAMPING_FACTOR = 0.98      
         
         print(f"Starting Dynamic Relaxation Phase ({RELAXATION_FRAMES} frames)...")
+        relaxation_time = 0.0
         for frame in range(1, RELAXATION_FRAMES + 1):
             for _ in range(config.SUBSTEPS):
-                solver.step(damping=DAMPING_FACTOR) 
+                solver.step(damping=DAMPING_FACTOR, current_time=relaxation_time)
+                relaxation_time += config.DT
         print("Dynamic Relaxation Complete. Fluid is settled.\n=========================================")
         
         pos_initial = solver.particles.x.to_numpy()
