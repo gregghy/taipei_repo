@@ -31,6 +31,26 @@ def apply_grid_boundary_conditions(grid_v: ti.template()): # type: ignore
         if j >= config.GRID_RES_Y - config.PADDING and grid_v[i, j][1] > 0.0:
             grid_v[i, j][1] = 0.0
 
+
+@ti.kernel
+def apply_grid_non_slip_boundary_condition(grid_v: ti.template()): # type: ignore
+    for i, j in grid_v:
+        # Left and Right
+        if i < config.PADDING and grid_v[i, j][0] < 0.0:
+            grid_v[i, j][0] = 0.0  
+            grid_v[i, j][1] = 0.0  
+        if i >= config.GRID_RES_X - config.PADDING and grid_v[i, j][0] > 0.0:
+            grid_v[i, j][0] = 0.0  
+            grid_v[i, j][1] = 0.0  
+
+        # Bottom and Top
+        if j < config.PADDING and grid_v[i, j][1] < 0.0:
+            grid_v[i, j][1] = 0.0  
+            grid_v[i, j][0] = 0.0  
+        if j >= config.GRID_RES_Y - config.PADDING and grid_v[i, j][1] > 0.0:
+            grid_v[i, j][1] = 0.0
+            grid_v[i, j][0] = 0.0  
+
 @ti.func
 def Compute_EBC_Force(m_I, v_I, f_net_I, r, n, bc_type, v_target):
     """

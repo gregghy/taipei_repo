@@ -1,0 +1,45 @@
+[Taichi] version 1.7.4, llvm 15.0.4, commit b4b956fd, linux, python 3.12.3
+[Taichi] Starting on arch=cuda
+Solver: standard | particles = 6000 | DT = 5.2910e-05 | SUBSTEPS/frame = 315
+Exported static domain boundary to /home/gregghy/taipei_repo/eos_v1/benchmarks/standard_2D/domain_boundary.vtk
+Starting Dynamic Relaxation Phase (30 frames)...
+Dynamic Relaxation Complete.
+=========================================
+solver              : standard
+backend             : Arch.cuda
+frames              : 300 (+30 relaxation)
+DT                  : 5.291005e-05 s
+substeps per frame  : 315
+total steps (main)  : 94500
+particles (initial) : 6000
+setup wall time     : 0.06 s
+relaxation wall time: 6.57 s (9450 steps)
+main loop wall time : 59.64 s
+steps per second    : 1584.4
+ms per step         : 0.631
+ms per frame (sim)  : 198.8
+vtk export wall time: 5.54 s
+=========================================
+=========================================================================
+Kernel Profiler(count, default) @ CUDA on NVIDIA GeForce RTX 5050
+=========================================================================
+[      %     total   count |      min       avg       max   ] Kernel name
+-------------------------------------------------------------------------
+[ 15.49%   1.651 s  94500x |    0.004     0.017     1.382 ms] grid_update_c114_0_kernel_0_range_for
+[ 11.12%   1.186 s  94500x |    0.006     0.013     1.040 ms] compute_forces_c102_0_kernel_0_range_for
+[ 10.89%   1.161 s  94500x |    0.006     0.012     1.332 ms] p2g_APIC_c92_0_kernel_0_range_for
+[  9.81%   1.046 s  94500x |    0.005     0.011     1.101 ms] nodal_Fbar_P2G_c94_0_kernel_0_range_for
+[  9.74%   1.039 s  94500x |    0.004     0.011    30.527 ms] clear_c90_0_kernel_0_range_for
+[  9.24%   0.985 s  94500x |    0.004     0.010     7.694 ms] nodal_Fbar_G2P_and_stress_c98_0_kernel_0_range_for
+[  9.16%   0.977 s  94500x |    0.003     0.010    15.263 ms] apply_boundaries_c118_0_kernel_0_range_for
+[  9.11%   0.972 s  94500x |    0.004     0.010     1.616 ms] g2p_APIC_c122_0_kernel_0_range_for
+[  8.71%   0.928 s  94500x |    0.003     0.010     1.342 ms] update_kinematics_c132_0_kernel_0_range_for
+[  6.60%   0.704 s  94500x |    0.003     0.007     0.858 ms] p2g_APIC_c92_0_kernel_1_range_for
+[  0.05%   0.005 s    300x |    0.004     0.017     0.192 ms] matrix_to_ext_arr_c28_0_kernel_0_range_for
+[  0.05%   0.005 s    300x |    0.004     0.016     0.143 ms] tensor_to_ext_arr_c6_0_kernel_0_range_for
+[  0.04%   0.005 s    300x |    0.004     0.016     0.142 ms] matrix_to_ext_arr_c28_1_kernel_0_range_for
+-------------------------------------------------------------------------
+[100.00%] Total execution time:  10.664 s   number of results: 13
+=========================================================================
+
+Summary and kernel profile written to /home/gregghy/taipei_repo/eos_v1/benchmarks/standard_2D

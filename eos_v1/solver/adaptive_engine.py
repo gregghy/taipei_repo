@@ -19,7 +19,10 @@ class AdaptiveMPMSolver2D:
         self._apply_fine_level_timestep()
         self.particles = AdaptiveParticleSystem2D(self.grid)
         self.scatter_to_ancestors = bool(getattr(config, 'AMR_SCATTER_TO_ANCESTORS', True))
-        self.allow_promotion_without_split = bool(getattr(config, 'AMR_ALLOW_LEVEL_PROMOTION_WITHOUT_SPLIT', False))
+        self.allow_promotion_without_split = (bool(getattr(config, 'AMR_ALLOW_LEVEL_PROMOTION_WITHOUT_SPLIT', False))
+                                              and not self.particles.split_enabled)
+        self._split_overflow_warned = False
+        self._step_count = 0
 
     def _configure_from_standard_scenario(self):
         if config.ACTIVE_SCENARIO in ["DAM_BREAK", "IMMERSED"]:
@@ -49,7 +52,11 @@ class AdaptiveMPMSolver2D:
             max_wave_speed = config.C_0 + getattr(config, 'V_MAX_ESTIMATE', 0.0)
             dt_fine = config.CFL * fine_dx / max_wave_speed
             config.DT = min(config.DT, dt_fine)
-            config.SUBSTEPS = int(math.ceil(config.FRAME_DT / config.DT)) if hasattr(config, 'FRAME_DT') else 1
+            if hasattr(config, 'FRAME_DT'):
+                config.SUBSTEPS = int(math.ceil(config.FRAME_DT / config.DT))
+                config.DT = config.FRAME_DT / config.SUBSTEPS
+            else:
+                config.SUBSTEPS = 1
 
     @ti.func
     def _weights(self, level: ti.template(), x):
@@ -102,7 +109,7 @@ class AdaptiveMPMSolver2D:
 
     @ti.kernel
     def p2g_APIC(self):
-        for p in range(self.particles.n_particles):
+        for p in range(self.particles.active_count[None]):
             particle_level = self.particles.level[p]
             for level in ti.static(range(self.grid.num_levels)):
                 if ti.static(self.scatter_to_ancestors):
@@ -134,7 +141,7 @@ class AdaptiveMPMSolver2D:
 
     @ti.kernel
     def compute_forces(self):
-        for p in range(self.particles.n_particles):
+        for p in range(self.particles.active_count[None]):
             particle_level = self.particles.level[p]
             for level in ti.static(range(self.grid.num_levels)):
                 if ti.static(self.scatter_to_ancestors):
@@ -149,7 +156,7 @@ class AdaptiveMPMSolver2D:
         for level in ti.static(range(self.grid.num_levels)):
             for I in ti.grouped(self.grid.m[level]):
                 m_I = self.grid.m[level][I]
-                if m_I > 1e-8:
+                if m_I > self.grid.node_mass_cutoff[level]:
                     x_I = self.grid.node_position(level, I)
                     v_platform_x = 0.0
                     v_platform_y = 0.0
@@ -191,7 +198,7 @@ class AdaptiveMPMSolver2D:
         for level in ti.static(range(self.grid.num_levels)):
             for I in ti.grouped(self.grid.m[level]):
                 m_I = self.grid.m[level][I]
-                if m_I > 1e-8:
+                if m_I > self.grid.node_mass_cutoff[level]:
                     self.grid.v_old[level][I] = self.grid.v[level][I]
                     self.grid.v[level][I] += (self.grid.f[level][I] / m_I) * config.DT
                     self.grid.v[level][I] *= damping
@@ -202,13 +209,17 @@ class AdaptiveMPMSolver2D:
             for I in ti.grouped(self.grid.v[level]):
                 x_I = self.grid.node_position(level, I)
                 if x_I[0] <= self.grid.domain_min[0] and self.grid.v[level][I][0] < 0.0:
+                    self.grid.v[level][I][1] = 0.0
                     self.grid.v[level][I][0] = 0.0
                 if x_I[0] >= self.grid.domain_max[0] and self.grid.v[level][I][0] > 0.0:
+                    self.grid.v[level][I][1] = 0.0
                     self.grid.v[level][I][0] = 0.0
                 if x_I[1] <= self.grid.domain_min[1] and self.grid.v[level][I][1] < 0.0:
                     self.grid.v[level][I][1] = 0.0
+                    self.grid.v[level][I][0] = 0.0
                 if x_I[1] >= self.grid.domain_max[1] and self.grid.v[level][I][1] > 0.0:
                     self.grid.v[level][I][1] = 0.0
+                    self.grid.v[level][I][0] = 0.0
 
     @ti.func
     def _g2p_level(self, p, level: ti.template(), t: float):
@@ -267,7 +278,7 @@ class AdaptiveMPMSolver2D:
 
     @ti.kernel
     def g2p_APIC(self, t: float):
-        for p in range(self.particles.n_particles):
+        for p in range(self.particles.active_count[None]):
             particle_level = self.particles.level[p]
             for level in ti.static(range(self.grid.num_levels)):
                 if particle_level == level:
@@ -277,7 +288,7 @@ class AdaptiveMPMSolver2D:
     def count_particles_by_level(self, counts: ti.template()):
         for level in ti.static(range(self.grid.num_levels)):
             counts[level] = 0
-        for p in range(self.particles.n_particles):
+        for p in range(self.particles.active_count[None]):
             ti.atomic_add(counts[self.particles.level[p]], 1)
 
     def step(self, damping=1.0, current_time=0.0):
@@ -290,4 +301,12 @@ class AdaptiveMPMSolver2D:
         self.grid_update(damping)
         self.apply_boundaries()
         self.grid.fill_fine_boundary_velocities()
+        self.apply_boundaries()
         self.g2p_APIC(current_time)
+        if self.particles.split_enabled:
+            self.particles.split_particles()
+            self._step_count += 1
+            if self._step_count % 500 == 0 and not self._split_overflow_warned:
+                if self.particles.split_overflow[None] > 0:
+                    print("WARNING: particle split capacity exhausted; increase AMR_PARTICLE_CAPACITY_FACTOR")
+                    self._split_overflow_warned = True

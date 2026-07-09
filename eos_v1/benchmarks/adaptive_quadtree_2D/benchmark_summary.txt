@@ -1,0 +1,18 @@
+solver              : adaptive
+backend             : Arch.cuda
+frames              : 300 (+30 relaxation)
+DT                  : 1.323802e-05 s
+substeps per frame  : 1259
+total steps (main)  : 377700
+particles (initial) : 26784
+particles (final)   : 79737
+particles per level : [52319, 4667, 22751]
+level dx            : ['1.0000e-02', '5.0000e-03', '2.5000e-03']
+split overflow      : 0
+setup wall time     : 0.72 s
+relaxation wall time: 56.12 s (37770 steps)
+main loop wall time : 568.26 s
+steps per second    : 664.7
+ms per step         : 1.505
+ms per frame (sim)  : 1894.2
+vtk export wall time: 45.19 s

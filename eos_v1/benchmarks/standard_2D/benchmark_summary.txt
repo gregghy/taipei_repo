@@ -1,0 +1,14 @@
+solver              : standard
+backend             : Arch.cuda
+frames              : 300 (+30 relaxation)
+DT                  : 5.291005e-05 s
+substeps per frame  : 315
+total steps (main)  : 94500
+particles (initial) : 6000
+setup wall time     : 0.06 s
+relaxation wall time: 6.57 s (9450 steps)
+main loop wall time : 59.64 s
+steps per second    : 1584.4
+ms per step         : 0.631
+ms per frame (sim)  : 198.8
+vtk export wall time: 5.54 s

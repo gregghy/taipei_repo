@@ -1,0 +1,21 @@
+=========================================================================
+Kernel Profiler(count, default) @ CUDA on NVIDIA GeForce RTX 5050
+=========================================================================
+[      %     total   count |      min       avg       max   ] Kernel name
+-------------------------------------------------------------------------
+[ 15.49%   1.651 s  94500x |    0.004     0.017     1.382 ms] grid_update_c114_0_kernel_0_range_for
+[ 11.12%   1.186 s  94500x |    0.006     0.013     1.040 ms] compute_forces_c102_0_kernel_0_range_for
+[ 10.89%   1.161 s  94500x |    0.006     0.012     1.332 ms] p2g_APIC_c92_0_kernel_0_range_for
+[  9.81%   1.046 s  94500x |    0.005     0.011     1.101 ms] nodal_Fbar_P2G_c94_0_kernel_0_range_for
+[  9.74%   1.039 s  94500x |    0.004     0.011    30.527 ms] clear_c90_0_kernel_0_range_for
+[  9.24%   0.985 s  94500x |    0.004     0.010     7.694 ms] nodal_Fbar_G2P_and_stress_c98_0_kernel_0_range_for
+[  9.16%   0.977 s  94500x |    0.003     0.010    15.263 ms] apply_boundaries_c118_0_kernel_0_range_for
+[  9.11%   0.972 s  94500x |    0.004     0.010     1.616 ms] g2p_APIC_c122_0_kernel_0_range_for
+[  8.71%   0.928 s  94500x |    0.003     0.010     1.342 ms] update_kinematics_c132_0_kernel_0_range_for
+[  6.60%   0.704 s  94500x |    0.003     0.007     0.858 ms] p2g_APIC_c92_0_kernel_1_range_for
+[  0.05%   0.005 s    300x |    0.004     0.017     0.192 ms] matrix_to_ext_arr_c28_0_kernel_0_range_for
+[  0.05%   0.005 s    300x |    0.004     0.016     0.143 ms] tensor_to_ext_arr_c6_0_kernel_0_range_for
+[  0.04%   0.005 s    300x |    0.004     0.016     0.142 ms] matrix_to_ext_arr_c28_1_kernel_0_range_for
+-------------------------------------------------------------------------
+[100.00%] Total execution time:  10.664 s   number of results: 13
+=========================================================================

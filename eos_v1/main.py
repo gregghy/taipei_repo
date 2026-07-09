@@ -16,6 +16,15 @@ from utils.exporter import WriteInteriorMoving_3d
 from utils.exporter import write_ntu_wireframe_vtk
 from utils.exporter import write_normals_vtk
 
+def get_particle_arrays(solver):
+    pos = solver.particles.x.to_numpy()
+    pressure = solver.particles.pressure.to_numpy()
+    velocity = solver.particles.v.to_numpy()
+    if callable(getattr(solver.particles, 'n_active', None)):
+        n_active = solver.particles.n_active()
+        pos, pressure, velocity = pos[:n_active], pressure[:n_active], velocity[:n_active]
+    return pos, pressure, velocity
+
 def main():
     # 1. Initialize Taichi on the GPU
     ti.init(arch=ti.gpu)
@@ -90,9 +99,7 @@ def main():
         write_boundary_vtk(min_x, min_y, max_x, max_y, output_dir=output_directory)
     
     print("Exporting initial state (t=0)...")
-    pos_initial = solver.particles.x.to_numpy()
-    pressure_initial = solver.particles.pressure.to_numpy()
-    velocity_initial = solver.particles.v.to_numpy()
+    pos_initial, pressure_initial, velocity_initial = get_particle_arrays(solver)
     write_vtk(0, pos_initial, pressure_initial, velocity_initial, output_dir=output_directory)
     
     if config.ACTIVE_SCENARIO == "DAM_BREAK" and config.IS_DAMBREAK_WITH_OBSTACLE:
@@ -146,9 +153,7 @@ def main():
                 relaxation_time += config.DT
         print("Dynamic Relaxation Complete. Fluid is settled.\n=========================================")
         
-        pos_initial = solver.particles.x.to_numpy()
-        pressure_initial = solver.particles.pressure.to_numpy()
-        velocity_initial = solver.particles.v.to_numpy()
+        pos_initial, pressure_initial, velocity_initial = get_particle_arrays(solver)
         write_vtk(0, pos_initial, pressure_initial, velocity_initial, output_dir=output_directory)  
     
     # =========================================================
@@ -163,9 +168,7 @@ def main():
             current_time += config.DT
             
         # Extract data to CPU for export
-        pos = solver.particles.x.to_numpy()
-        pressure = solver.particles.pressure.to_numpy()
-        velocity = solver.particles.v.to_numpy()
+        pos, pressure, velocity = get_particle_arrays(solver)
         
         # Export to VTK
         write_vtk(frame, pos, pressure, velocity, output_dir=output_directory)

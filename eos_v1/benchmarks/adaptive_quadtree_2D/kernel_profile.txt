@@ -1,0 +1,35 @@
+=========================================================================
+Kernel Profiler(count, default) @ CUDA on NVIDIA GeForce RTX 5050
+=========================================================================
+[      %     total   count |      min       avg       max   ] Kernel name
+-------------------------------------------------------------------------
+[ 30.16%  52.075 s 377700x |    0.055     0.138     1.605 ms] p2g_APIC_c94_0_kernel_1_range_for
+[ 22.12%  38.198 s 377700x |    0.043     0.101     1.761 ms] compute_forces_c96_0_kernel_1_range_for
+[  4.65%   8.024 s 377700x |    0.010     0.021     1.697 ms] g2p_APIC_c104_0_kernel_1_range_for
+[  3.66%   6.320 s 755400x |    0.003     0.008   132.066 ms] apply_boundaries_c102_0_kernel_2_range_for
+[  3.62%   6.257 s 755400x |    0.003     0.008     1.284 ms] apply_boundaries_c102_0_kernel_0_range_for
+[  3.56%   6.139 s 755400x |    0.003     0.008     1.681 ms] apply_boundaries_c102_0_kernel_1_range_for
+[  3.35%   5.791 s 377700x |    0.003     0.015    64.782 ms] grid_update_c100_0_kernel_0_range_for
+[  3.30%   5.695 s 377700x |    0.003     0.015     1.408 ms] g2p_APIC_c104_0_kernel_0_serial
+[  2.53%   4.363 s 377700x |    0.007     0.012     1.651 ms] split_particles_c92_0_kernel_1_range_for
+[  1.96%   3.386 s 377700x |    0.003     0.009   256.364 ms] grid_update_c100_0_kernel_1_range_for
+[  1.92%   3.311 s 377700x |    0.003     0.009   565.051 ms] split_particles_c92_0_kernel_0_serial
+[  1.88%   3.240 s 377700x |    0.004     0.009     1.602 ms] fill_fine_boundary_velocities_c88_0_kernel_1_range_for
+[  1.86%   3.215 s 377700x |    0.003     0.009     1.698 ms] grid_update_c100_0_kernel_2_range_for
+[  1.79%   3.095 s 377700x |    0.003     0.008     1.461 ms] normalize_momentum_c86_0_kernel_2_range_for
+[  1.77%   3.061 s 377700x |    0.003     0.008     1.673 ms] clear_c84_0_kernel_2_range_for
+[  1.77%   3.051 s 377700x |    0.003     0.008     1.380 ms] fill_fine_boundary_velocities_c88_0_kernel_0_range_for
+[  1.75%   3.028 s 377700x |    0.003     0.008     1.348 ms] clear_c84_0_kernel_0_range_for
+[  1.69%   2.922 s 377700x |    0.003     0.008     1.871 ms] normalize_momentum_c86_0_kernel_1_range_for
+[  1.68%   2.908 s 377700x |    0.003     0.008     0.873 ms] clear_c84_0_kernel_1_range_for
+[  1.66%   2.870 s 377700x |    0.003     0.008     1.517 ms] normalize_momentum_c86_0_kernel_0_range_for
+[  1.66%   2.869 s 377700x |    0.003     0.008     1.405 ms] compute_forces_c96_0_kernel_0_serial
+[  1.64%   2.830 s 377700x |    0.003     0.007     1.447 ms] p2g_APIC_c94_0_kernel_0_serial
+[  0.01%   0.010 s    300x |    0.011     0.035     0.118 ms] snode_reader_81_kernel_0_serial
+[  0.00%   0.006 s    300x |    0.006     0.021     0.945 ms] tensor_to_ext_arr_c6_0_kernel_0_range_for
+[  0.00%   0.006 s    300x |    0.007     0.020     0.056 ms] matrix_to_ext_arr_c28_0_kernel_0_range_for
+[  0.00%   0.006 s    300x |    0.007     0.019     0.058 ms] matrix_to_ext_arr_c28_1_kernel_0_range_for
+[  0.00%   0.006 s    755x |    0.004     0.007     0.068 ms] snode_reader_83_kernel_0_serial
+-------------------------------------------------------------------------
+[100.00%] Total execution time: 172.682 s   number of results: 27
+=========================================================================
