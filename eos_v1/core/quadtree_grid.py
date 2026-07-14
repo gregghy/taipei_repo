@@ -62,16 +62,16 @@ class QuadtreeGrid2D:
                 bool(self.region_max_np[level][1] < self.domain_max[1] - tol),
             ))
 
-        self.region_min = ti.Vector.field(2, dtype=ti.f32, shape=self.num_levels)
-        self.region_max = ti.Vector.field(2, dtype=ti.f32, shape=self.num_levels)
-        self.origin = ti.Vector.field(2, dtype=ti.f32, shape=self.num_levels)
-        self.level_dx = ti.field(dtype=ti.f32, shape=self.num_levels)
-        self.level_inv_dx = ti.field(dtype=ti.f32, shape=self.num_levels)
-        self.region_min.from_numpy(self.region_min_np.astype(np.float32))
-        self.region_max.from_numpy(self.region_max_np.astype(np.float32))
-        self.origin.from_numpy(self.origin_np.astype(np.float32))
-        self.level_dx.from_numpy(np.array(self.dx, dtype=np.float32))
-        self.level_inv_dx.from_numpy(np.array(self.inv_dx, dtype=np.float32))
+        self.region_min = ti.Vector.field(2, dtype=ti.f64, shape=self.num_levels)
+        self.region_max = ti.Vector.field(2, dtype=ti.f64, shape=self.num_levels)
+        self.origin = ti.Vector.field(2, dtype=ti.f64, shape=self.num_levels)
+        self.level_dx = ti.field(dtype=ti.f64, shape=self.num_levels)
+        self.level_inv_dx = ti.field(dtype=ti.f64, shape=self.num_levels)
+        self.region_min.from_numpy(self.region_min_np.astype(np.float64))
+        self.region_max.from_numpy(self.region_max_np.astype(np.float64))
+        self.origin.from_numpy(self.origin_np.astype(np.float64))
+        self.level_dx.from_numpy(np.array(self.dx, dtype=np.float64))
+        self.level_inv_dx.from_numpy(np.array(self.inv_dx, dtype=np.float64))
 
         self.m = []
         self.v = []
@@ -79,10 +79,10 @@ class QuadtreeGrid2D:
         self.v_old = []
         for level in range(self.num_levels):
             shape = self.res[level]
-            self.m.append(ti.field(dtype=ti.f32, shape=shape))
-            self.v.append(ti.Vector.field(2, dtype=ti.f32, shape=shape))
-            self.f.append(ti.Vector.field(2, dtype=ti.f32, shape=shape))
-            self.v_old.append(ti.Vector.field(2, dtype=ti.f32, shape=shape))
+            self.m.append(ti.field(dtype=ti.f64, shape=shape))
+            self.v.append(ti.Vector.field(2, dtype=ti.f64, shape=shape))
+            self.f.append(ti.Vector.field(2, dtype=ti.f64, shape=shape))
+            self.v_old.append(ti.Vector.field(2, dtype=ti.f64, shape=shape))
 
         self.leaf_level, self.leaf_origin, self.leaf_size = self._build_leaf_cells()
         self.leaf_count = len(self.leaf_level)
@@ -164,8 +164,8 @@ class QuadtreeGrid2D:
             sizes.append(np.full(int(keep.sum()), dx, dtype=np.float64))
         return (
             np.concatenate(levels),
-            np.concatenate(origins).astype(np.float32),
-            np.concatenate(sizes).astype(np.float32),
+            np.concatenate(origins).astype(np.float64),
+            np.concatenate(sizes).astype(np.float64),
         )
 
     def _validate_leaf_tiling(self):
@@ -189,7 +189,7 @@ class QuadtreeGrid2D:
 
     @ti.func
     def node_position(self, level: ti.template(), I):
-        return self.origin[level] + ti.cast(I, ti.f32) * self.level_dx[level]
+        return self.origin[level] + ti.cast(I, ti.f64) * self.level_dx[level]
 
     @ti.func
     def in_bounds(self, level: ti.template(), I):
@@ -200,9 +200,9 @@ class QuadtreeGrid2D:
         for level in ti.static(range(self.num_levels)):
             for I in ti.grouped(self.m[level]):
                 self.m[level][I] = 0.0
-                self.v[level][I] = ti.Vector.zero(ti.f32, 2)
-                self.f[level][I] = ti.Vector.zero(ti.f32, 2)
-                self.v_old[level][I] = ti.Vector.zero(ti.f32, 2)
+                self.v[level][I] = ti.Vector.zero(ti.f64, 2)
+                self.f[level][I] = ti.Vector.zero(ti.f64, 2)
+                self.v_old[level][I] = ti.Vector.zero(ti.f64, 2)
 
     @ti.kernel
     def normalize_momentum(self):
@@ -211,18 +211,18 @@ class QuadtreeGrid2D:
                 if self.m[level][I] > self.node_mass_cutoff[level]:
                     self.v[level][I] /= self.m[level][I]
                 else:
-                    self.v[level][I] = ti.Vector.zero(ti.f32, 2)
+                    self.v[level][I] = ti.Vector.zero(ti.f64, 2)
 
     @ti.func
     def sample_velocity(self, level: ti.template(), x):
         inv_dx = self.level_inv_dx[level]
         fx = (x - self.origin[level]) * inv_dx
         base = ti.cast(fx - 0.5, ti.i32)
-        d = fx - ti.cast(base, ti.f32)
+        d = fx - ti.cast(base, ti.f64)
         w0 = 0.5 * (1.5 - d)**2
         w1 = 0.75 - (d - 1.0)**2
         w2 = 0.5 * (d - 0.5)**2
-        v_out = ti.Vector.zero(ti.f32, 2)
+        v_out = ti.Vector.zero(ti.f64, 2)
         for i, j in ti.static(ti.ndrange(3, 3)):
             offset = ti.Vector([i, j])
             I = base + offset

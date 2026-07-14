@@ -63,7 +63,7 @@ class AdaptiveMPMSolver2D:
         inv_dx = self.grid.level_inv_dx[level]
         fx = (x - self.grid.origin[level]) * inv_dx
         base = ti.cast(fx - 0.5, ti.i32)
-        d = fx - ti.cast(base, ti.f32)
+        d = fx - ti.cast(base, ti.f64)
         w0 = 0.5 * (1.5 - d)**2
         w1 = 0.75 - (d - 1.0)**2
         w2 = 0.5 * (d - 0.5)**2
@@ -205,28 +205,26 @@ class AdaptiveMPMSolver2D:
 
     @ti.kernel
     def apply_boundaries(self):
+        # Free-slip walls: zero only the wall-normal velocity component,
+        # identical logic to the standard (non-AMR) solver.
         for level in ti.static(range(self.grid.num_levels)):
             for I in ti.grouped(self.grid.v[level]):
                 x_I = self.grid.node_position(level, I)
                 if x_I[0] <= self.grid.domain_min[0] and self.grid.v[level][I][0] < 0.0:
-                    self.grid.v[level][I][1] = 0.0
                     self.grid.v[level][I][0] = 0.0
                 if x_I[0] >= self.grid.domain_max[0] and self.grid.v[level][I][0] > 0.0:
-                    self.grid.v[level][I][1] = 0.0
                     self.grid.v[level][I][0] = 0.0
                 if x_I[1] <= self.grid.domain_min[1] and self.grid.v[level][I][1] < 0.0:
                     self.grid.v[level][I][1] = 0.0
-                    self.grid.v[level][I][0] = 0.0
                 if x_I[1] >= self.grid.domain_max[1] and self.grid.v[level][I][1] > 0.0:
                     self.grid.v[level][I][1] = 0.0
-                    self.grid.v[level][I][0] = 0.0
 
     @ti.func
     def _g2p_level(self, p, level: ti.template(), t: float):
         x_p = self.particles.x[p]
         base, w0, w1, w2, _, _, _ = self._weights(level, x_p)
-        v_new = ti.Vector.zero(ti.f32, 2)
-        B_new = ti.Matrix.zero(ti.f32, 2, 2)
+        v_new = ti.Vector.zero(ti.f64, 2)
+        B_new = ti.Matrix.zero(ti.f64, 2, 2)
         for i, j in ti.static(ti.ndrange(3, 3)):
             I = base + ti.Vector([i, j])
             if self.grid.in_bounds(level, I):
@@ -261,7 +259,7 @@ class AdaptiveMPMSolver2D:
             if r < 0.0:
                 new_x = new_x + (ti.abs(r) + 1e-5) * n
         self.particles.x[p] = new_x
-        identity = ti.Matrix.identity(ti.f32, 2)
+        identity = ti.Matrix.identity(ti.f64, 2)
         F_new = (identity + C_new * config.DT) @ self.particles.F[p]
         self.particles.F[p] = F_new
         stress_new = StressUsingWater(F_new, C_new)
@@ -273,8 +271,9 @@ class AdaptiveMPMSolver2D:
         if ti.static(self.allow_promotion_without_split):
             self.particles.level[p] = new_level
         else:
-            if new_level < self.particles.level[p]:
-                self.particles.level[p] = new_level
+            if ti.static(not self.particles.merge_enabled):
+                if new_level < self.particles.level[p]:
+                    self.particles.level[p] = new_level
 
     @ti.kernel
     def g2p_APIC(self, t: float):
@@ -304,6 +303,7 @@ class AdaptiveMPMSolver2D:
         self.apply_boundaries()
         self.g2p_APIC(current_time)
         if self.particles.split_enabled:
+            self.particles.merge_particles()
             self.particles.split_particles()
             self._step_count += 1
             if self._step_count % 500 == 0 and not self._split_overflow_warned:
