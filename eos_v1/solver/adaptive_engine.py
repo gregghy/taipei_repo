@@ -19,6 +19,7 @@ class AdaptiveMPMSolver2D:
         self.scatter_to_ancestors = bool(getattr(config, 'AMR_SCATTER_TO_ANCESTORS', True))
         self.allow_promotion_without_split = (bool(getattr(config, 'AMR_ALLOW_LEVEL_PROMOTION_WITHOUT_SPLIT', False))
                                               and not self.particles.split_enabled)
+        self.dynamic_regrid_interval = max(1, int(getattr(config, 'AMR_DYNAMIC_REGRID_INTERVAL', 16)))
         self._split_overflow_warned = False
         self._step_count = 0
 
@@ -203,6 +204,14 @@ class AdaptiveMPMSolver2D:
                 if particle_level == level:
                     self._g2p_level(p, level, t)
 
+    def _adapt_particles(self, complete=False):
+        if not self.particles.split_enabled:
+            return
+        self.particles.merge_particles()
+        passes = self.grid.max_level if complete else 1
+        for _ in range(passes):
+            self.particles.split_particles()
+
     @ti.kernel
     def count_particles_by_level(self, counts: ti.template()):
         for level in ti.static(range(self.grid.num_levels)):
@@ -211,11 +220,19 @@ class AdaptiveMPMSolver2D:
             ti.atomic_add(counts[self.particles.level[p]], 1)
 
     def step(self, damping=1.0, current_time=0.0):
+        if self.grid.dynamic_refinement and self._step_count % self.dynamic_regrid_interval == 0:
+            self.grid.update_dynamic_refinement(current_time)
+            self._adapt_particles(complete=True)
         self.grid.clear()
-        self.grid.initialize_penalty_mass()
-        if config.ACTIVE_SCENARIO == "IMMERSED":
-            self.grid.update_moving_platform_penalty_mass(current_time)
-            self.grid.add_moving_penalty_mass()
+        if self.grid.dynamic_refinement:
+            self.grid.initialize_dynamic_penalty_mass()
+            if config.ACTIVE_SCENARIO == "IMMERSED":
+                self.grid.add_moving_platform_penalty_mass_gpu(current_time)
+        else:
+            self.grid.initialize_penalty_mass()
+            if config.ACTIVE_SCENARIO == "IMMERSED":
+                self.grid.update_moving_platform_penalty_mass(current_time)
+                self.grid.add_moving_penalty_mass()
         self.p2g_APIC()
         self.grid.normalize_momentum()
         self.compute_forces()
@@ -223,11 +240,9 @@ class AdaptiveMPMSolver2D:
         self.grid.fill_fine_boundary_velocities()
         self.g2p_APIC(current_time)
 
-        if self.particles.split_enabled:
-            self.particles.merge_particles()
-            self.particles.split_particles()
-            self._step_count += 1
-            if self._step_count % 500 == 0 and not self._split_overflow_warned:
-                if self.particles.split_overflow[None] > 0:
-                    print("WARNING: particle split capacity exhausted; increase AMR_PARTICLE_CAPACITY_FACTOR")
-                    self._split_overflow_warned = True
+        self._adapt_particles()
+        self._step_count += 1
+        if self._step_count % 500 == 0 and not self._split_overflow_warned:
+            if self.particles.split_overflow[None] > 0:
+                print("WARNING: particle split capacity exhausted; increase AMR_PARTICLE_CAPACITY_FACTOR")
+                self._split_overflow_warned = True
