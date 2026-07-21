@@ -8,8 +8,6 @@ import config
 from core.quadtree_grid import QuadtreeGrid2D
 from core.adaptive_particles import AdaptiveParticleSystem2D
 from physics.constitutive_model import StressUsingWater
-import physics.boundary as bnd
-
 
 @ti.data_oriented
 class AdaptiveMPMSolver2D:
@@ -25,7 +23,7 @@ class AdaptiveMPMSolver2D:
         self._step_count = 0
 
     def _configure_from_standard_scenario(self):
-        if config.ACTIVE_SCENARIO in ["DAM_BREAK", "IMMERSED"]:
+        if config.ACTIVE_SCENARIO in ("DAM_BREAK", "IMMERSED"):
             config.AMR_DOMAIN_MIN_X = config.PADDING * config.DX
             config.AMR_DOMAIN_MIN_Y = config.PADDING * config.DY
             config.AMR_DOMAIN_WIDTH = config.GRID_WIDTH
@@ -152,72 +150,15 @@ class AdaptiveMPMSolver2D:
                         self._compute_forces_level(p, level)
 
     @ti.kernel
-    def compute_moving_ebc_forces(self, t: float):
-        for level in ti.static(range(self.grid.num_levels)):
-            for I in ti.grouped(self.grid.m[level]):
-                m_I = self.grid.m[level][I]
-                if m_I > self.grid.node_mass_cutoff[level]:
-                    x_I = self.grid.node_position(level, I)
-                    v_platform_x = 0.0
-                    v_platform_y = 0.0
-                    displacement_y = 0.0
-                    if t < config.PLATFORM_STOP_TIME:
-                        v_platform_y = config.PLATFORM_VELOCITY_Y
-                        displacement_y = v_platform_y * t
-                    elif t < config.PLATFORM_STOP_TIME + config.PLATFORM_DECEL_TIME:
-                        time_in_decel = t - config.PLATFORM_STOP_TIME
-                        progress = time_in_decel / config.PLATFORM_DECEL_TIME
-                        v_platform_y = config.PLATFORM_VELOCITY_Y * (1.0 - progress)
-                        dist_before_stop = config.PLATFORM_VELOCITY_Y * config.PLATFORM_STOP_TIME
-                        dist_during_decel = config.PLATFORM_VELOCITY_Y * time_in_decel - 0.5 * (config.PLATFORM_VELOCITY_Y / config.PLATFORM_DECEL_TIME) * (time_in_decel**2)
-                        displacement_y = dist_before_stop + dist_during_decel
-                    else:
-                        dist_before_stop = config.PLATFORM_VELOCITY_Y * config.PLATFORM_STOP_TIME
-                        total_decel_dist = 0.5 * config.PLATFORM_VELOCITY_Y * config.PLATFORM_DECEL_TIME
-                        displacement_y = dist_before_stop + total_decel_dist
-                    r, normal = bnd.Get_Rect_SDF(
-                        x_I,
-                        config.INT_MOVINGRECT_XMIN,
-                        config.INT_MOVINGRECT_XMAX,
-                        config.INT_MOVINGRECT_YMIN + displacement_y,
-                        config.INT_MOVINGRECT_YMAX + displacement_y,
-                    )
-                    f_bc = bnd.Compute_EBC_Force(
-                        m_I,
-                        self.grid.v[level][I],
-                        self.grid.f[level][I],
-                        r,
-                        normal,
-                        3,
-                        ti.Vector([v_platform_x, v_platform_y]),
-                    )
-                    self.grid.f[level][I] += f_bc
-
-    @ti.kernel
     def grid_update(self, damping: float):
         for level in ti.static(range(self.grid.num_levels)):
             for I in ti.grouped(self.grid.m[level]):
-                m_I = self.grid.m[level][I]
-                if m_I > self.grid.node_mass_cutoff[level]:
+                if self.grid.m[level][I] > self.grid.node_mass_cutoff[level]:
                     self.grid.v_old[level][I] = self.grid.v[level][I]
-                    self.grid.v[level][I] += (self.grid.f[level][I] / m_I) * config.DT
+                    for axis in ti.static(range(2)):
+                        effective_mass = self.grid.m[level][I] + self.grid.boundary_mass[level][I][axis]
+                        self.grid.v[level][I][axis] += self.grid.f[level][I][axis] * config.DT / effective_mass
                     self.grid.v[level][I] *= damping
-
-    @ti.kernel
-    def apply_boundaries(self):
-        # Free-slip walls: zero only the wall-normal velocity component,
-        # identical logic to the standard (non-AMR) solver.
-        for level in ti.static(range(self.grid.num_levels)):
-            for I in ti.grouped(self.grid.v[level]):
-                x_I = self.grid.node_position(level, I)
-                if x_I[0] <= self.grid.domain_min[0] and self.grid.v[level][I][0] < 0.0:
-                    self.grid.v[level][I][0] = 0.0
-                if x_I[0] >= self.grid.domain_max[0] and self.grid.v[level][I][0] > 0.0:
-                    self.grid.v[level][I][0] = 0.0
-                if x_I[1] <= self.grid.domain_min[1] and self.grid.v[level][I][1] < 0.0:
-                    self.grid.v[level][I][1] = 0.0
-                if x_I[1] >= self.grid.domain_max[1] and self.grid.v[level][I][1] > 0.0:
-                    self.grid.v[level][I][1] = 0.0
 
     @ti.func
     def _g2p_level(self, p, level: ti.template(), t: float):
@@ -237,27 +178,6 @@ class AdaptiveMPMSolver2D:
         self.particles.v[p] = v_new
         self.particles.C[p] = C_new
         new_x = x_p + v_new * config.DT
-        eps = 0.25 * self.grid.level_dx[level]
-        new_x[0] = ti.max(self.grid.domain_min[0] + eps, ti.min(new_x[0], self.grid.domain_max[0] - eps))
-        new_x[1] = ti.max(self.grid.domain_min[1] + eps, ti.min(new_x[1], self.grid.domain_max[1] - eps))
-        if ti.static(config.ACTIVE_SCENARIO == "IMMERSED"):
-            displacement_y = 0.0
-            if t < config.PLATFORM_STOP_TIME:
-                displacement_y = config.PLATFORM_VELOCITY_Y * t
-            elif t < config.PLATFORM_STOP_TIME + config.PLATFORM_DECEL_TIME:
-                time_in_decel = t - config.PLATFORM_STOP_TIME
-                dist_before = config.PLATFORM_VELOCITY_Y * config.PLATFORM_STOP_TIME
-                dist_during = config.PLATFORM_VELOCITY_Y * time_in_decel - 0.5 * (config.PLATFORM_VELOCITY_Y / config.PLATFORM_DECEL_TIME) * (time_in_decel**2)
-                displacement_y = dist_before + dist_during
-            else:
-                dist_before = config.PLATFORM_VELOCITY_Y * config.PLATFORM_STOP_TIME
-                dist_during = 0.5 * config.PLATFORM_VELOCITY_Y * config.PLATFORM_DECEL_TIME
-                displacement_y = dist_before + dist_during
-            box_ymin = config.INT_MOVINGRECT_YMIN + displacement_y
-            box_ymax = config.INT_MOVINGRECT_YMAX + displacement_y
-            r, n = bnd.Get_Rect_SDF(new_x, config.INT_MOVINGRECT_XMIN, config.INT_MOVINGRECT_XMAX, box_ymin, box_ymax)
-            if r < 0.0:
-                new_x = new_x + (ti.abs(r) + 1e-5) * n
         self.particles.x[p] = new_x
         identity = ti.Matrix.identity(ti.f64, 2)
         F_new = (identity + C_new * config.DT) @ self.particles.F[p]
@@ -292,16 +212,17 @@ class AdaptiveMPMSolver2D:
 
     def step(self, damping=1.0, current_time=0.0):
         self.grid.clear()
+        self.grid.initialize_penalty_mass()
+        if config.ACTIVE_SCENARIO == "IMMERSED":
+            self.grid.update_moving_platform_penalty_mass(current_time)
+            self.grid.add_moving_penalty_mass()
         self.p2g_APIC()
         self.grid.normalize_momentum()
         self.compute_forces()
-        if config.ACTIVE_SCENARIO == "IMMERSED":
-            self.compute_moving_ebc_forces(current_time)
         self.grid_update(damping)
-        self.apply_boundaries()
         self.grid.fill_fine_boundary_velocities()
-        self.apply_boundaries()
         self.g2p_APIC(current_time)
+
         if self.particles.split_enabled:
             self.particles.merge_particles()
             self.particles.split_particles()

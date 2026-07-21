@@ -14,7 +14,7 @@ config.DIM = 2
 config.AMR_MAX_LEVEL = 3
 
 # Make the immersed platform ~2/3 of the domain width and center it.
-config.PLATFORM_WIDTH = 0.96 * config.GRID_WIDTH
+config.PLATFORM_WIDTH = 0.4 * config.GRID_WIDTH
 config.FLUID_CENTER_X = (config.PADDING * config.DX) + (config.GRID_WIDTH / 2.0)
 config.INT_MOVINGRECT_XMIN = config.FLUID_CENTER_X - (config.PLATFORM_WIDTH / 2.0)
 config.INT_MOVINGRECT_XMAX = config.FLUID_CENTER_X + (config.PLATFORM_WIDTH / 2.0)
@@ -28,11 +28,10 @@ fine_xmin = platform_cx - (platform_width / 2.0 + margin)
 fine_xmax = platform_cx + (platform_width / 2.0 + margin)
 # Default immersed fine region is roughly AMR_DOMAIN_MIN_Y .. INT_MOVINGRECT_YMAX.
 default_fine_height = config.INT_MOVINGRECT_YMAX - config.AMR_DOMAIN_MIN_Y
-fine_height = 0.5 * default_fine_height
+fine_height = 1 * default_fine_height
 fine_ymax = config.INT_MOVINGRECT_YMAX
 fine_ymin = fine_ymax - fine_height
 refinement_box = ((fine_xmin, fine_ymin), (fine_xmax, fine_ymax))
-
 # Scenario geometry and boundary fields are already computed for DIM=2 in config.py.
 import utils.visualization as ut
 import physics.boundary as bnd
@@ -52,7 +51,7 @@ def get_particle_arrays(solver):
 
 
 def main():
-    ti.init(arch=ti.gpu)
+    ti.init(arch=ti.gpu, default_fp=ti.f64)
     bnd.init_boundary_fields()
 
     print("Initializing immersed adaptive MPM solver...")
@@ -62,6 +61,13 @@ def main():
     print(f"Finest dx: {solver.grid.dx[-1]:.6e}")
     print(f"DT after AMR adjustment: {config.DT:.6e}")
     print(f"Substeps per frame: {config.SUBSTEPS}")
+    counts = ti.field(dtype=ti.i32, shape=solver.grid.num_levels)
+
+    def report_particle_levels(tag):
+        solver.count_particles_by_level(counts)
+        print(f"{tag}: active={solver.particles.n_active()} particles per level={counts.to_numpy().tolist()}")
+
+    report_particle_levels("Initial")
 
     min_x = config.PADDING * config.DX
     min_y = config.PADDING * config.DY
@@ -82,7 +88,7 @@ def main():
     )
 
     # Dynamic relaxation.
-    RELAXATION_FRAMES = 10
+    RELAXATION_FRAMES = 1
     DAMPING_FACTOR = 0.98
     relaxation_time = 0.0
     print(f"Starting dynamic relaxation ({RELAXATION_FRAMES} frames)...")
@@ -91,12 +97,13 @@ def main():
             solver.step(damping=DAMPING_FACTOR, current_time=relaxation_time)
             relaxation_time += config.DT
     print("Dynamic relaxation complete.")
+    report_particle_levels("After relaxation")
 
     pos, pressure, velocity = get_particle_arrays(solver)
     write_vtk(0, pos, pressure, velocity, output_dir=output_directory)
 
     # Main simulation loop.
-    TOTAL_FRAMES = 300
+    TOTAL_FRAMES = 50
     current_time = 0.0
     print(f"Starting main loop ({TOTAL_FRAMES} frames)...")
     for frame in range(1, TOTAL_FRAMES + 1):
@@ -136,6 +143,8 @@ def main():
             output_dir=output_directory,
         )
 
+        if frame == 1 or frame % 10 == 0:
+            report_particle_levels(f"Frame {frame}")
         print(f"Frame {frame}/{TOTAL_FRAMES} exported.")
 
     print("Done.")

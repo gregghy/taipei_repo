@@ -1,5 +1,6 @@
 import sys
 import os
+import math
 import numpy as np
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -77,16 +78,145 @@ class QuadtreeGrid2D:
         self.v = []
         self.f = []
         self.v_old = []
+        self.boundary_mass = []
+        self.boundary_momentum = []
+        self.domain_boundary_mass = []
+        self.moving_boundary_mass = []
+        self.moving_boundary_momentum = []
         for level in range(self.num_levels):
             shape = self.res[level]
             self.m.append(ti.field(dtype=ti.f64, shape=shape))
             self.v.append(ti.Vector.field(2, dtype=ti.f64, shape=shape))
             self.f.append(ti.Vector.field(2, dtype=ti.f64, shape=shape))
             self.v_old.append(ti.Vector.field(2, dtype=ti.f64, shape=shape))
+            self.boundary_mass.append(ti.Vector.field(2, dtype=ti.f64, shape=shape))
+            self.boundary_momentum.append(ti.Vector.field(2, dtype=ti.f64, shape=shape))
+            self.domain_boundary_mass.append(ti.Vector.field(2, dtype=ti.f64, shape=shape))
+            self.moving_boundary_mass.append(ti.Vector.field(2, dtype=ti.f64, shape=shape))
+            self.moving_boundary_momentum.append(ti.Vector.field(2, dtype=ti.f64, shape=shape))
+
+        for field, values in zip(self.domain_boundary_mass, self._build_domain_boundary_mass()):
+            field.from_numpy(values)
 
         self.leaf_level, self.leaf_origin, self.leaf_size = self._build_leaf_cells()
         self.leaf_count = len(self.leaf_level)
         self._validate_leaf_tiling()
+
+    def _add_penalty_quadrature(self, mass, momentum, level, x_q, switch, wall_velocity, weight):
+        dx = self.dx[level]
+        fx = (x_q - self.origin_np[level]) / dx
+        base = np.floor(fx - 0.5).astype(np.int32)
+        d = fx - base
+        weights = (
+            0.5 * (1.5 - d) ** 2,
+            0.75 - (d - 1.0) ** 2,
+            0.5 * (d - 0.5) ** 2,
+        )
+        beta = config.AMR_BOUNDARY_PENALTY_NORMAL * config.RHO_0 * dx ** 2
+        for i in range(3):
+            for j in range(3):
+                I = base + np.array([i, j], dtype=np.int32)
+                if 0 <= I[0] < self.res_x[level] and 0 <= I[1] < self.res_y[level]:
+                    contribution = beta * weight * weights[i][0] * weights[j][1]
+                    mass[I[0], I[1]] += contribution * switch
+                    momentum[I[0], I[1]] += contribution * switch * wall_velocity
+
+    def _add_penalty_segment(self, mass, momentum, level, start, end, switch, wall_velocity):
+        length = float(np.linalg.norm(end - start))
+        count = max(1, int(math.ceil(length / self.dx[level])))
+        for cell in range(count):
+            for xi in (0.5 - 0.5 / math.sqrt(3.0), 0.5 + 0.5 / math.sqrt(3.0)):
+                point = start + (cell + xi) * (end - start) / count
+                weight = 0.5 * length / (count * self.dx[level])
+                self._add_penalty_quadrature(mass, momentum, level, point, switch, wall_velocity, weight)
+
+    def _build_domain_boundary_mass(self):
+        masses = [np.zeros((*shape, 2), dtype=np.float64) for shape in self.res]
+        zero_momentum = [np.zeros_like(mass) for mass in masses]
+        zero_velocity = np.zeros(2, dtype=np.float64)
+        for level in range(self.num_levels):
+            minimum = self.region_min_np[level]
+            maximum = self.region_max_np[level]
+            left, right, bottom, top = self.face_interior[level]
+            if not bottom:
+                self._add_penalty_segment(
+                    masses[level], zero_momentum[level], level,
+                    np.array([minimum[0], self.domain_min[1]]),
+                    np.array([maximum[0], self.domain_min[1]]),
+                    np.array([0.0, 1.0]), zero_velocity,
+                )
+            if not top:
+                self._add_penalty_segment(
+                    masses[level], zero_momentum[level], level,
+                    np.array([minimum[0], self.domain_max[1]]),
+                    np.array([maximum[0], self.domain_max[1]]),
+                    np.array([0.0, 1.0]), zero_velocity,
+                )
+            if not left:
+                self._add_penalty_segment(
+                    masses[level], zero_momentum[level], level,
+                    np.array([self.domain_min[0], minimum[1]]),
+                    np.array([self.domain_min[0], maximum[1]]),
+                    np.array([1.0, 0.0]), zero_velocity,
+                )
+            if not right:
+                self._add_penalty_segment(
+                    masses[level], zero_momentum[level], level,
+                    np.array([self.domain_max[0], minimum[1]]),
+                    np.array([self.domain_max[0], maximum[1]]),
+                    np.array([1.0, 0.0]), zero_velocity,
+                )
+        return masses
+
+    def update_moving_platform_penalty_mass(self, t):
+        masses = [np.zeros((*shape, 2), dtype=np.float64) for shape in self.res]
+        momenta = [np.zeros_like(mass) for mass in masses]
+        if t < config.PLATFORM_STOP_TIME:
+            velocity_y = config.PLATFORM_VELOCITY_Y
+            displacement_y = velocity_y * t
+        elif t < config.PLATFORM_STOP_TIME + config.PLATFORM_DECEL_TIME:
+            time_in_decel = t - config.PLATFORM_STOP_TIME
+            velocity_y = config.PLATFORM_VELOCITY_Y * (1.0 - time_in_decel / config.PLATFORM_DECEL_TIME)
+            displacement_y = (
+                config.PLATFORM_VELOCITY_Y * config.PLATFORM_STOP_TIME
+                + config.PLATFORM_VELOCITY_Y * time_in_decel
+                - 0.5 * config.PLATFORM_VELOCITY_Y * time_in_decel ** 2 / config.PLATFORM_DECEL_TIME
+            )
+        else:
+            velocity_y = 0.0
+            displacement_y = config.PLATFORM_VELOCITY_Y * (
+                config.PLATFORM_STOP_TIME + 0.5 * config.PLATFORM_DECEL_TIME
+            )
+        x_min = config.INT_MOVINGRECT_XMIN
+        x_max = config.INT_MOVINGRECT_XMAX
+        y_min = config.INT_MOVINGRECT_YMIN + displacement_y
+        y_max = config.INT_MOVINGRECT_YMAX + displacement_y
+        velocity = np.array([0.0, velocity_y], dtype=np.float64)
+        for level in range(self.num_levels):
+            self._add_penalty_segment(
+                masses[level], momenta[level], level,
+                np.array([x_min, y_min]), np.array([x_max, y_min]),
+                np.array([0.0, 1.0]), velocity,
+            )
+            self._add_penalty_segment(
+                masses[level], momenta[level], level,
+                np.array([x_min, y_max]), np.array([x_max, y_max]),
+                np.array([0.0, 1.0]), velocity,
+            )
+            self._add_penalty_segment(
+                masses[level], momenta[level], level,
+                np.array([x_min, y_min]), np.array([x_min, y_max]),
+                np.array([1.0, 0.0]), velocity,
+            )
+            self._add_penalty_segment(
+                masses[level], momenta[level], level,
+                np.array([x_max, y_min]), np.array([x_max, y_max]),
+                np.array([1.0, 0.0]), velocity,
+            )
+        for field, values in zip(self.moving_boundary_mass, masses):
+            field.from_numpy(values)
+        for field, values in zip(self.moving_boundary_momentum, momenta):
+            field.from_numpy(values)
 
     def _default_refinement_box(self):
         width = float(getattr(config, 'AMR_FINE_REGION_WIDTH', min(0.002, self.domain_width)))
@@ -203,13 +333,33 @@ class QuadtreeGrid2D:
                 self.v[level][I] = ti.Vector.zero(ti.f64, 2)
                 self.f[level][I] = ti.Vector.zero(ti.f64, 2)
                 self.v_old[level][I] = ti.Vector.zero(ti.f64, 2)
+                self.boundary_mass[level][I] = ti.Vector.zero(ti.f64, 2)
+                self.boundary_momentum[level][I] = ti.Vector.zero(ti.f64, 2)
+
+    @ti.kernel
+    def initialize_penalty_mass(self):
+        for level in ti.static(range(self.num_levels)):
+            for I in ti.grouped(self.m[level]):
+                self.boundary_mass[level][I] = self.domain_boundary_mass[level][I]
+                self.boundary_momentum[level][I] = ti.Vector.zero(ti.f64, 2)
+
+    @ti.kernel
+    def add_moving_penalty_mass(self):
+        for level in ti.static(range(self.num_levels)):
+            for I in ti.grouped(self.m[level]):
+                self.boundary_mass[level][I] += self.moving_boundary_mass[level][I]
+                self.boundary_momentum[level][I] += self.moving_boundary_momentum[level][I]
 
     @ti.kernel
     def normalize_momentum(self):
         for level in ti.static(range(self.num_levels)):
             for I in ti.grouped(self.m[level]):
                 if self.m[level][I] > self.node_mass_cutoff[level]:
-                    self.v[level][I] /= self.m[level][I]
+                    for axis in ti.static(range(2)):
+                        effective_mass = self.m[level][I] + self.boundary_mass[level][I][axis]
+                        self.v[level][I][axis] = (
+                            self.v[level][I][axis] + self.boundary_momentum[level][I][axis]
+                        ) / effective_mass
                 else:
                     self.v[level][I] = ti.Vector.zero(ti.f64, 2)
 
