@@ -28,10 +28,11 @@ config.G_MAG = 9.81
 config.C_0 = 10.0 * math.sqrt(2.0 * config.G_MAG * config.MP_HEIGHT)
 config.V_MAX_ESTIMATE = math.sqrt(2.0 * config.G_MAG * config.MP_HEIGHT)
 config.DT = 1e-5
-config.INT_MOVINGRECT_XMIN = 0.009
-config.INT_MOVINGRECT_XMAX = 0.019
-config.INT_MOVINGRECT_YMIN = 0.024
-config.INT_MOVINGRECT_YMAX = 0.028
+config.INT_MOVINGRECT_XMIN = 0.007
+config.INT_MOVINGRECT_XMAX = 0.013
+config.INT_MOVINGRECT_YMIN = 0.012
+config.INT_MOVINGRECT_YMAX = 0.016
+config.PLATFORM_VELOCITY_X = 0.002
 config.PLATFORM_VELOCITY_Y = -0.01
 config.PLATFORM_STOP_TIME = 0.5
 config.PLATFORM_DECEL_TIME = 0.2
@@ -57,29 +58,72 @@ initial_min = grid.region_min.to_numpy()
 initial_max = grid.region_max.to_numpy()
 initial_origin = grid.origin.to_numpy()
 
+grid.clear()
+grid.initialize_dynamic_penalty_mass()
+dynamic_domain_mass = [field.to_numpy() for field in grid.boundary_mass]
+reference_domain_mass = [field.to_numpy() for field in grid.domain_boundary_mass]
+for dynamic, reference in zip(dynamic_domain_mass, reference_domain_mass):
+    assert np.allclose(dynamic.sum(axis=(0, 1)), reference.sum(axis=(0, 1)), rtol=1e-12, atol=1e-12)
+
+penalty_time = 0.4
+grid.update_moving_platform_penalty_mass(penalty_time)
+reference_platform_mass = [field.to_numpy() for field in grid.moving_boundary_mass]
+reference_platform_momentum = [field.to_numpy() for field in grid.moving_boundary_momentum]
+grid.clear()
+grid.initialize_dynamic_penalty_mass()
+grid.add_moving_platform_penalty_mass_gpu(penalty_time)
+for dynamic, domain, reference in zip(grid.boundary_mass, dynamic_domain_mass, reference_platform_mass):
+    dynamic_sum = (dynamic.to_numpy() - domain).sum(axis=(0, 1))
+    reference_sum = reference.sum(axis=(0, 1))
+    assert np.allclose(dynamic_sum, reference_sum, rtol=1e-12, atol=1e-12), (dynamic_sum, reference_sum)
+for dynamic, reference in zip(grid.boundary_momentum, reference_platform_momentum):
+    assert np.allclose(dynamic.to_numpy().sum(axis=(0, 1)), reference.sum(axis=(0, 1)), rtol=1e-12, atol=1e-12)
+
 sample_time = 0.75
-grid.update_dynamic_refinement(sample_time)
+assert grid.update_dynamic_refinement(sample_time)
 updated_min = grid.region_min.to_numpy()
 updated_max = grid.region_max.to_numpy()
 updated_origin = grid.origin.to_numpy()
+level_shifts = grid.level_refinement_shift.to_numpy()
 shift = grid.refinement_shift.to_numpy()
+assert not grid.update_dynamic_refinement(sample_time)
 
-assert shift[1] < 0.0
+assert shift[0] > 0.0 and shift[1] < 0.0
+assert np.allclose(level_shifts[0], 0.0)
+assert level_shifts[1, 1] > level_shifts[-1, 1]
+assert np.allclose(shift, level_shifts[-1])
 assert np.allclose(updated_min[0], initial_min[0])
 assert np.allclose(updated_max[0], initial_max[0])
 assert np.allclose(updated_origin[0], initial_origin[0])
-assert np.allclose(updated_min[1:] - initial_min[1:], shift)
-assert np.allclose(updated_max[1:] - initial_max[1:], shift)
-assert np.allclose(updated_origin[1:] - initial_origin[1:], shift)
+assert np.allclose(updated_min - initial_min, level_shifts)
+assert np.allclose(updated_max - initial_max, level_shifts)
+assert np.allclose(updated_origin - initial_origin, level_shifts)
+assert np.allclose(grid.region_min_np, updated_min)
+assert np.allclose(grid.region_max_np, updated_max)
+assert np.allclose(grid.origin_np, updated_origin)
 
-old_center = 0.5 * (initial_min[-1] + initial_max[-1])
-new_center = 0.5 * (updated_min[-1] + updated_max[-1])
+for time in np.linspace(0.0, config.PLATFORM_STOP_TIME + config.PLATFORM_DECEL_TIME, 33):
+    grid.update_dynamic_refinement(time)
+    regions_min = grid.region_min.to_numpy()
+    regions_max = grid.region_max.to_numpy()
+    shifts = grid.level_refinement_shift.to_numpy()
+    assert np.all(regions_min >= grid.domain_min - 1e-12)
+    assert np.all(regions_max <= grid.domain_max + 1e-12)
+    assert np.allclose(shifts[0], 0.0)
+    for level in range(1, grid.num_levels):
+        assert np.all(regions_min[level] >= regions_min[level - 1] - 1e-12)
+        assert np.all(regions_max[level] <= regions_max[level - 1] + 1e-12)
+        assert np.allclose(shifts[level] / grid.dx[level - 1], np.round(shifts[level] / grid.dx[level - 1]))
+assert not grid.update_dynamic_refinement(sample_time)
+
+old_probe = initial_max[-1] - np.array([0.25 * grid.dx[-1], 0.25 * grid.dx[-1]])
+new_probe = updated_min[-1] + np.array([0.25 * grid.dx[-1], 0.25 * grid.dx[-1]])
 assert grid.max_level == 2
 
 probes = ti.Vector.field(2, dtype=ti.f64, shape=2)
 levels = ti.field(dtype=ti.i32, shape=2)
-probes[0] = old_center
-probes[1] = new_center
+probes[0] = old_probe
+probes[1] = new_probe
 
 
 @ti.kernel
@@ -93,15 +137,32 @@ probe_levels = levels.to_numpy()
 assert probe_levels[0] < grid.max_level
 assert probe_levels[1] == grid.max_level
 
+assert grid.update_dynamic_refinement(0.0)
 solver._adapt_particles(complete=True)
 n_before = solver.particles.n_active()
+mass_before = solver.particles.mass.to_numpy()[:n_before].sum()
+solver.step(current_time=0.2)
+first_shift = grid.refinement_shift.to_numpy()
+assert first_shift[0] > 0.0 and first_shift[1] < 0.0
 solver.step(current_time=sample_time)
 n_after = solver.particles.n_active()
 positions = solver.particles.x.to_numpy()[:n_after]
 particle_levels = solver.particles.level.to_numpy()[:n_after]
+mass_after = solver.particles.mass.to_numpy()[:n_after].sum()
+assert np.allclose(grid.refinement_shift.to_numpy(), shift)
 assert n_before > 0 and n_after > 0
 assert np.isfinite(positions).all()
 assert np.all((particle_levels >= 0) & (particle_levels <= grid.max_level))
+assert np.isclose(mass_after, mass_before, rtol=1e-12, atol=1e-15)
+assert solver.particles.split_overflow[None] == 0
+solver.particles.split_overflow[None] = 1
+try:
+    solver._check_dynamic_split_capacity()
+except RuntimeError as error:
+    assert "AMR_PARTICLE_CAPACITY_FACTOR" in str(error)
+else:
+    raise AssertionError("dynamic split overflow did not fail fast")
+solver.particles.split_overflow[None] = 0
 
 print(f"refinement shift = {shift.tolist()}")
 print(f"probe levels = {probe_levels.tolist()}")

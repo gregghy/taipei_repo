@@ -212,6 +212,20 @@ class AdaptiveMPMSolver2D:
         for _ in range(passes):
             self.particles.split_particles()
 
+    def _check_dynamic_split_capacity(self):
+        overflow = int(self.particles.split_overflow[None])
+        if not self.grid.dynamic_refinement or overflow == 0:
+            return
+        n_initial = max(self.particles.n_initial, 1)
+        full_mesh_capacity = self.grid.leaf_count * self.particles.ppc_axis ** 2
+        recommended_factor = math.ceil(full_mesh_capacity / n_initial)
+        raise RuntimeError(
+            "Dynamic AMR particle capacity exhausted "
+            f"({overflow} failed splits; capacity {self.particles.capacity}). "
+            f"Increase AMR_PARTICLE_CAPACITY_FACTOR to at least {recommended_factor} "
+            "for the conservative fully occupied mesh bound, or reduce the moving refinement window."
+        )
+
     @ti.kernel
     def count_particles_by_level(self, counts: ti.template()):
         for level in ti.static(range(self.grid.num_levels)):
@@ -221,8 +235,9 @@ class AdaptiveMPMSolver2D:
 
     def step(self, damping=1.0, current_time=0.0):
         if self.grid.dynamic_refinement and self._step_count % self.dynamic_regrid_interval == 0:
-            self.grid.update_dynamic_refinement(current_time)
-            self._adapt_particles(complete=True)
+            if self.grid.update_dynamic_refinement(current_time):
+                self._adapt_particles(complete=True)
+                self._check_dynamic_split_capacity()
         self.grid.clear()
         if self.grid.dynamic_refinement:
             self.grid.initialize_dynamic_penalty_mass()
@@ -241,6 +256,7 @@ class AdaptiveMPMSolver2D:
         self.g2p_APIC(current_time)
 
         self._adapt_particles()
+        self._check_dynamic_split_capacity()
         self._step_count += 1
         if self._step_count % 500 == 0 and not self._split_overflow_warned:
             if self.particles.split_overflow[None] > 0:

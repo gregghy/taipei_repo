@@ -56,7 +56,8 @@ class QuadtreeGrid2D:
         self._build_level_geometry()
         self.reference_region_min_np = self.region_min_np.copy()
         self.reference_region_max_np = self.region_max_np.copy()
-        self.dynamic_shift_min_np, self.dynamic_shift_max_np = self._dynamic_shift_bounds()
+        self.reference_origin_np = self.origin_np.copy()
+        self.level_refinement_shift_np = np.zeros((self.num_levels, 2), dtype=np.float64)
 
         self.node_mass_cutoff = [1e-6 * float(config.RHO_0) * (self.dx[l] / self.ppc_axis) ** 2
                                  for l in range(self.num_levels)]
@@ -77,8 +78,11 @@ class QuadtreeGrid2D:
         self.reference_region_max = ti.Vector.field(2, dtype=ti.f64, shape=self.num_levels)
         self.reference_origin = ti.Vector.field(2, dtype=ti.f64, shape=self.num_levels)
         self.refinement_shift = ti.Vector.field(2, dtype=ti.f64, shape=())
-        self.dynamic_shift_min = ti.Vector.field(2, dtype=ti.f64, shape=())
-        self.dynamic_shift_max = ti.Vector.field(2, dtype=ti.f64, shape=())
+        self.level_refinement_shift = ti.Vector.field(2, dtype=ti.f64, shape=self.num_levels)
+        self.platform_bounds = ti.Vector.field(4, dtype=ti.f64, shape=())
+        self.platform_motion_parameters = ti.Vector.field(4, dtype=ti.f64, shape=())
+        self.dynamic_domain_min = ti.Vector.field(2, dtype=ti.f64, shape=())
+        self.dynamic_domain_max = ti.Vector.field(2, dtype=ti.f64, shape=())
         self.level_dx = ti.field(dtype=ti.f64, shape=self.num_levels)
         self.level_inv_dx = ti.field(dtype=ti.f64, shape=self.num_levels)
         self.region_min.from_numpy(self.region_min_np.astype(np.float64))
@@ -88,8 +92,21 @@ class QuadtreeGrid2D:
         self.reference_region_max.from_numpy(self.reference_region_max_np.astype(np.float64))
         self.reference_origin.from_numpy(self.origin_np.astype(np.float64))
         self.refinement_shift[None] = [0.0, 0.0]
-        self.dynamic_shift_min[None] = self.dynamic_shift_min_np
-        self.dynamic_shift_max[None] = self.dynamic_shift_max_np
+        self.level_refinement_shift.from_numpy(self.level_refinement_shift_np)
+        self.platform_bounds[None] = [
+            config.INT_MOVINGRECT_XMIN,
+            config.INT_MOVINGRECT_XMAX,
+            config.INT_MOVINGRECT_YMIN,
+            config.INT_MOVINGRECT_YMAX,
+        ]
+        self.platform_motion_parameters[None] = [
+            config.PLATFORM_VELOCITY_X,
+            config.PLATFORM_VELOCITY_Y,
+            config.PLATFORM_STOP_TIME,
+            config.PLATFORM_DECEL_TIME,
+        ]
+        self.dynamic_domain_min[None] = self.domain_min
+        self.dynamic_domain_max[None] = self.domain_max
         self.level_dx.from_numpy(np.array(self.dx, dtype=np.float64))
         self.level_inv_dx.from_numpy(np.array(self.inv_dx, dtype=np.float64))
 
@@ -190,27 +207,11 @@ class QuadtreeGrid2D:
     def update_moving_platform_penalty_mass(self, t):
         masses = [np.zeros((*shape, 2), dtype=np.float64) for shape in self.res]
         momenta = [np.zeros_like(mass) for mass in masses]
-        if t < config.PLATFORM_STOP_TIME:
-            velocity_y = config.PLATFORM_VELOCITY_Y
-            displacement_y = velocity_y * t
-        elif t < config.PLATFORM_STOP_TIME + config.PLATFORM_DECEL_TIME:
-            time_in_decel = t - config.PLATFORM_STOP_TIME
-            velocity_y = config.PLATFORM_VELOCITY_Y * (1.0 - time_in_decel / config.PLATFORM_DECEL_TIME)
-            displacement_y = (
-                config.PLATFORM_VELOCITY_Y * config.PLATFORM_STOP_TIME
-                + config.PLATFORM_VELOCITY_Y * time_in_decel
-                - 0.5 * config.PLATFORM_VELOCITY_Y * time_in_decel ** 2 / config.PLATFORM_DECEL_TIME
-            )
-        else:
-            velocity_y = 0.0
-            displacement_y = config.PLATFORM_VELOCITY_Y * (
-                config.PLATFORM_STOP_TIME + 0.5 * config.PLATFORM_DECEL_TIME
-            )
-        x_min = config.INT_MOVINGRECT_XMIN
-        x_max = config.INT_MOVINGRECT_XMAX
-        y_min = config.INT_MOVINGRECT_YMIN + displacement_y
-        y_max = config.INT_MOVINGRECT_YMAX + displacement_y
-        velocity = np.array([0.0, velocity_y], dtype=np.float64)
+        displacement, velocity = self._platform_motion_numpy(t)
+        x_min = config.INT_MOVINGRECT_XMIN + displacement[0]
+        x_max = config.INT_MOVINGRECT_XMAX + displacement[0]
+        y_min = config.INT_MOVINGRECT_YMIN + displacement[1]
+        y_max = config.INT_MOVINGRECT_YMAX + displacement[1]
         for level in range(self.num_levels):
             self._add_penalty_segment(
                 masses[level], momenta[level], level,
@@ -245,135 +246,193 @@ class QuadtreeGrid2D:
             (config.INT_MOVINGRECT_XMAX + margin_x, config.INT_MOVINGRECT_YMAX + margin_y),
         )
 
-    def _dynamic_shift_bounds(self):
-        if not self.dynamic_refinement or self.num_levels <= 1:
-            return np.zeros(2, dtype=np.float64), np.zeros(2, dtype=np.float64)
-        lower_y = -np.inf
-        upper_y = np.inf
+    def _platform_motion_numpy(self, t):
+        velocity = np.array([config.PLATFORM_VELOCITY_X, config.PLATFORM_VELOCITY_Y], dtype=np.float64)
+        stop_time = float(config.PLATFORM_STOP_TIME)
+        decel_time = float(config.PLATFORM_DECEL_TIME)
+        if t < stop_time:
+            return velocity * t, velocity
+        if t < stop_time + decel_time:
+            time_in_decel = t - stop_time
+            return (
+                velocity * (stop_time + time_in_decel - 0.5 * time_in_decel ** 2 / decel_time),
+                velocity * (1.0 - time_in_decel / decel_time),
+            )
+        return velocity * (stop_time + 0.5 * decel_time), np.zeros(2, dtype=np.float64)
+
+    def _snap_dynamic_shift(self, displacement, spacing):
+        return np.copysign(np.floor(np.abs(displacement) / spacing + 0.5), displacement) * spacing
+
+    def _level_dynamic_shifts(self, t):
+        displacement, _ = self._platform_motion_numpy(t)
+        shifts = np.zeros((self.num_levels, 2), dtype=np.float64)
         for level in range(1, self.num_levels):
-            inset = self.ghost_band_cells * self.dx[level]
-            lower_y = max(lower_y, self.domain_min[1] + inset - self.region_min_np[level][1])
-            upper_y = min(upper_y, self.domain_max[1] - inset - self.region_max_np[level][1])
-        if lower_y > upper_y:
-            raise ValueError("Dynamic refinement window cannot fit inside the domain")
-        return (
-            np.array([0.0, lower_y], dtype=np.float64),
-            np.array([0.0, upper_y], dtype=np.float64),
-        )
+            spacing = self.dx[level - 1]
+            desired = self._snap_dynamic_shift(displacement, spacing)
+            parent_min = self.reference_region_min_np[level - 1] + shifts[level - 1]
+            parent_max = self.reference_region_max_np[level - 1] + shifts[level - 1]
+            lower = np.maximum(self.domain_min - self.reference_region_min_np[level], parent_min - self.reference_region_min_np[level])
+            upper = np.minimum(self.domain_max - self.reference_region_max_np[level], parent_max - self.reference_region_max_np[level])
+            lower = np.ceil(lower / spacing - 1e-9) * spacing
+            upper = np.floor(upper / spacing + 1e-9) * spacing
+            if np.any(lower > upper):
+                raise ValueError(f"Dynamic level {level} cannot remain nested inside its parent")
+            shifts[level] = np.minimum(np.maximum(desired, lower), upper)
+        return shifts
 
     @ti.func
     def _platform_motion(self, t: ti.f64):
-        velocity = ti.cast(config.PLATFORM_VELOCITY_Y, ti.f64)
-        stop_time = ti.cast(config.PLATFORM_STOP_TIME, ti.f64)
-        decel_time = ti.cast(config.PLATFORM_DECEL_TIME, ti.f64)
-        displacement_y = ti.cast(0.0, ti.f64)
-        velocity_y = ti.cast(0.0, ti.f64)
+        parameters = self.platform_motion_parameters[None]
+        velocity = ti.Vector([parameters[0], parameters[1]])
+        stop_time = parameters[2]
+        decel_time = parameters[3]
+        displacement = ti.Vector.zero(ti.f64, 2)
+        velocity_out = ti.Vector.zero(ti.f64, 2)
         if t < stop_time:
-            velocity_y = velocity
-            displacement_y = velocity_y * t
+            velocity_out = velocity
+            displacement = velocity * t
         elif t < stop_time + decel_time:
             time_in_decel = t - stop_time
-            velocity_y = velocity * (1.0 - time_in_decel / decel_time)
-            displacement_y = velocity * stop_time + velocity * time_in_decel - 0.5 * velocity * time_in_decel ** 2 / decel_time
+            velocity_out = velocity * (1.0 - time_in_decel / decel_time)
+            displacement = velocity * (stop_time + time_in_decel - 0.5 * time_in_decel ** 2 / decel_time)
         else:
-            displacement_y = velocity * (stop_time + 0.5 * decel_time)
-        return displacement_y, velocity_y
-
-    @ti.kernel
-    def _update_dynamic_refinement(self, t: ti.f64):
-        displacement_y, _ = self._platform_motion(t)
-        raw_steps = displacement_y / ti.cast(self.base_dx, ti.f64)
-        snapped_steps = ti.floor(raw_steps + 0.5)
-        if raw_steps < 0.0:
-            snapped_steps = -ti.floor(-raw_steps + 0.5)
-        shift = ti.Vector([0.0, snapped_steps * ti.cast(self.base_dx, ti.f64)])
-        shift[1] = ti.max(self.dynamic_shift_min[None][1], ti.min(self.dynamic_shift_max[None][1], shift[1]))
-        self.refinement_shift[None] = shift
-        for level in ti.static(range(self.num_levels)):
-            if ti.static(level == 0):
-                self.region_min[level] = self.reference_region_min[level]
-                self.region_max[level] = self.reference_region_max[level]
-                self.origin[level] = self.reference_origin[level]
-            else:
-                self.region_min[level] = self.reference_region_min[level] + shift
-                self.region_max[level] = self.reference_region_max[level] + shift
-                self.origin[level] = self.reference_origin[level] + shift
+            displacement = velocity * (stop_time + 0.5 * decel_time)
+        return displacement, velocity_out
 
     def update_dynamic_refinement(self, t):
-        if self.dynamic_refinement:
-            self._update_dynamic_refinement(t)
+        if not self.dynamic_refinement:
+            return False
+        shifts = self._level_dynamic_shifts(t)
+        if np.allclose(shifts, self.level_refinement_shift_np, rtol=0.0, atol=1e-12):
+            return False
+        self.level_refinement_shift_np = shifts
+        self.region_min_np = self.reference_region_min_np + shifts
+        self.region_max_np = self.reference_region_max_np + shifts
+        self.origin_np = self.reference_origin_np + shifts
+        self.region_min.from_numpy(self.region_min_np)
+        self.region_max.from_numpy(self.region_max_np)
+        self.origin.from_numpy(self.origin_np)
+        self.level_refinement_shift.from_numpy(shifts)
+        self.refinement_shift[None] = shifts[-1]
+        return True
 
     @ti.func
-    def _line_weight(self, distance, dx):
-        q = ti.abs(distance) / dx
-        weight = ti.cast(0.0, ti.f64)
-        if q < 0.5:
-            weight = 0.75 - q**2
-        elif q < 1.5:
-            weight = 0.5 * (1.5 - q)**2
-        return weight
-
-    @ti.func
-    def _add_horizontal_penalty(self, level: ti.template(), I, x_min, x_max, y, velocity):
+    def _add_dynamic_penalty_quadrature(self, level: ti.template(), x_q, switch, wall_velocity, weight):
+        half = ti.cast(0.5, ti.f64)
+        one = ti.cast(1.0, ti.f64)
         dx = self.level_dx[level]
-        x = self.node_position(level, I)
-        if x[0] >= x_min and x[0] <= x_max:
-            contribution = config.AMR_BOUNDARY_PENALTY_NORMAL * config.RHO_0 * dx**2 * self._line_weight(x[1] - y, dx)
-            self.boundary_mass[level][I][1] += contribution
-            self.boundary_momentum[level][I][1] += contribution * velocity[1]
+        fx = (x_q - self.origin[level]) / dx
+        base = ti.cast(ti.floor(fx - half), ti.i32)
+        d = fx - ti.cast(base, ti.f64)
+        w0 = half * (one + half - d)**2
+        w1 = ti.cast(0.75, ti.f64) - (d - one)**2
+        w2 = half * (d - half)**2
+        beta = ti.cast(config.AMR_BOUNDARY_PENALTY_NORMAL, ti.f64) * ti.cast(config.RHO_0, ti.f64) * dx**2
+        for i, j in ti.static(ti.ndrange(3, 3)):
+            I = base + ti.Vector([i, j])
+            if self.in_bounds(level, I):
+                wx = w0[0]
+                wy = w0[1]
+                if ti.static(i == 1):
+                    wx = w1[0]
+                if ti.static(i == 2):
+                    wx = w2[0]
+                if ti.static(j == 1):
+                    wy = w1[1]
+                if ti.static(j == 2):
+                    wy = w2[1]
+                contribution = beta * weight * wx * wy
+                for axis in ti.static(range(2)):
+                    self.boundary_mass[level][I][axis] += contribution * switch[axis]
+                    self.boundary_momentum[level][I][axis] += contribution * switch[axis] * wall_velocity[axis]
 
     @ti.func
-    def _add_vertical_penalty(self, level: ti.template(), I, x, y_min, y_max, velocity):
+    def _add_dynamic_penalty_segment(self, level: ti.template(), start, end, switch, wall_velocity):
         dx = self.level_dx[level]
-        position = self.node_position(level, I)
-        if position[1] >= y_min and position[1] <= y_max:
-            contribution = config.AMR_BOUNDARY_PENALTY_NORMAL * config.RHO_0 * dx**2 * self._line_weight(position[0] - x, dx)
-            self.boundary_mass[level][I][0] += contribution
-            self.boundary_momentum[level][I][0] += contribution * velocity[0]
+        segment = end - start
+        length = segment.norm()
+        count = ti.max(1, ti.cast(ti.ceil(length / dx), ti.i32))
+        weight = 0.5 * length / (ti.cast(count, ti.f64) * dx)
+        ti.loop_config(serialize=True)
+        for cell in range(count):
+            for quadrature_point in ti.static(range(2)):
+                xi = ti.cast(0.21132486540518713, ti.f64)
+                if ti.static(quadrature_point == 1):
+                    xi = ti.cast(0.7886751345948129, ti.f64)
+                point = start + (ti.cast(cell, ti.f64) + xi) * segment / ti.cast(count, ti.f64)
+                self._add_dynamic_penalty_quadrature(level, point, switch, wall_velocity, weight)
 
     @ti.func
-    def _apply_rectangular_penalty(self, level: ti.template(), I, x_min, x_max, y_min, y_max, velocity):
-        self._add_horizontal_penalty(level, I, x_min, x_max, y_min, velocity)
-        self._add_horizontal_penalty(level, I, x_min, x_max, y_max, velocity)
-        self._add_vertical_penalty(level, I, x_min, y_min, y_max, velocity)
-        self._add_vertical_penalty(level, I, x_max, y_min, y_max, velocity)
+    def _add_dynamic_rectangular_penalty(self, level: ti.template(), x_min, x_max, y_min, y_max, velocity):
+        horizontal = ti.Vector([ti.cast(0.0, ti.f64), ti.cast(1.0, ti.f64)])
+        vertical = ti.Vector([ti.cast(1.0, ti.f64), ti.cast(0.0, ti.f64)])
+        self._add_dynamic_penalty_segment(
+            level, ti.Vector([x_min, y_min]), ti.Vector([x_max, y_min]), horizontal, velocity,
+        )
+        self._add_dynamic_penalty_segment(
+            level, ti.Vector([x_min, y_max]), ti.Vector([x_max, y_max]), horizontal, velocity,
+        )
+        self._add_dynamic_penalty_segment(
+            level, ti.Vector([x_min, y_min]), ti.Vector([x_min, y_max]), vertical, velocity,
+        )
+        self._add_dynamic_penalty_segment(
+            level, ti.Vector([x_max, y_min]), ti.Vector([x_max, y_max]), vertical, velocity,
+        )
 
     @ti.kernel
     def initialize_dynamic_penalty_mass(self):
-        zero_velocity = ti.Vector([0.0, 0.0])
+        zero_velocity = ti.Vector.zero(ti.f64, 2)
+        horizontal = ti.Vector([ti.cast(0.0, ti.f64), ti.cast(1.0, ti.f64)])
+        vertical = ti.Vector([ti.cast(1.0, ti.f64), ti.cast(0.0, ti.f64)])
+        domain_min = self.dynamic_domain_min[None]
+        domain_max = self.dynamic_domain_max[None]
         for level in ti.static(range(self.num_levels)):
             minimum = self.region_min[level]
             maximum = self.region_max[level]
             tolerance = 0.5 * self.level_dx[level]
-            for I in ti.grouped(self.m[level]):
-                if minimum[1] <= self.domain_min[1] + tolerance:
-                    self._apply_rectangular_penalty(
-                        level, I, minimum[0], maximum[0], self.domain_min[1], self.domain_min[1], zero_velocity,
-                    )
-                if maximum[1] >= self.domain_max[1] - tolerance:
-                    self._apply_rectangular_penalty(
-                        level, I, minimum[0], maximum[0], self.domain_max[1], self.domain_max[1], zero_velocity,
-                    )
-                if minimum[0] <= self.domain_min[0] + tolerance:
-                    self._apply_rectangular_penalty(
-                        level, I, self.domain_min[0], self.domain_min[0], minimum[1], maximum[1], zero_velocity,
-                    )
-                if maximum[0] >= self.domain_max[0] - tolerance:
-                    self._apply_rectangular_penalty(
-                        level, I, self.domain_max[0], self.domain_max[0], minimum[1], maximum[1], zero_velocity,
-                    )
+            if minimum[1] <= domain_min[1] + tolerance:
+                self._add_dynamic_penalty_segment(
+                    level,
+                    ti.Vector([minimum[0], domain_min[1]]),
+                    ti.Vector([maximum[0], domain_min[1]]),
+                    horizontal,
+                    zero_velocity,
+                )
+            if maximum[1] >= domain_max[1] - tolerance:
+                self._add_dynamic_penalty_segment(
+                    level,
+                    ti.Vector([minimum[0], domain_max[1]]),
+                    ti.Vector([maximum[0], domain_max[1]]),
+                    horizontal,
+                    zero_velocity,
+                )
+            if minimum[0] <= domain_min[0] + tolerance:
+                self._add_dynamic_penalty_segment(
+                    level,
+                    ti.Vector([domain_min[0], minimum[1]]),
+                    ti.Vector([domain_min[0], maximum[1]]),
+                    vertical,
+                    zero_velocity,
+                )
+            if maximum[0] >= domain_max[0] - tolerance:
+                self._add_dynamic_penalty_segment(
+                    level,
+                    ti.Vector([domain_max[0], minimum[1]]),
+                    ti.Vector([domain_max[0], maximum[1]]),
+                    vertical,
+                    zero_velocity,
+                )
 
     @ti.kernel
     def add_moving_platform_penalty_mass_gpu(self, t: ti.f64):
-        displacement_y, velocity_y = self._platform_motion(t)
-        x_min = ti.cast(config.INT_MOVINGRECT_XMIN, ti.f64)
-        x_max = ti.cast(config.INT_MOVINGRECT_XMAX, ti.f64)
-        y_min = ti.cast(config.INT_MOVINGRECT_YMIN, ti.f64) + displacement_y
-        y_max = ti.cast(config.INT_MOVINGRECT_YMAX, ti.f64) + displacement_y
-        velocity = ti.Vector([0.0, velocity_y])
+        displacement, velocity = self._platform_motion(t)
+        bounds = self.platform_bounds[None]
+        x_min = bounds[0] + displacement[0]
+        x_max = bounds[1] + displacement[0]
+        y_min = bounds[2] + displacement[1]
+        y_max = bounds[3] + displacement[1]
         for level in ti.static(range(self.num_levels)):
-            for I in ti.grouped(self.m[level]):
-                self._apply_rectangular_penalty(level, I, x_min, x_max, y_min, y_max, velocity)
+            self._add_dynamic_rectangular_penalty(level, x_min, x_max, y_min, y_max, velocity)
 
     def _default_refinement_box(self):
         width = float(getattr(config, 'AMR_FINE_REGION_WIDTH', min(0.002, self.domain_width)))
