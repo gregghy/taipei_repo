@@ -65,6 +65,11 @@ def write_vtk(frame_number, pos, pressure, velocity, output_dir="output"): # use
     filename = os.path.join(output_dir, f"mpm_fluid_{frame_number:04d}.vtk")
     num_particles = len(pos)
     
+    # Sanitize NaN/inf to 0 so ParaView can load the file without errors.
+    pos = np.where(np.isfinite(pos), pos, 0.0)
+    pressure = np.where(np.isfinite(pressure), pressure, 0.0)
+    velocity = np.where(np.isfinite(velocity), velocity, 0.0)
+    
     with open(filename, 'w') as f:
         f.write("# vtk DataFile Version 3.0\n")
         f.write("MPM Simulation Data\n")

@@ -85,6 +85,9 @@ class QuadtreeGrid2D:
         self.dynamic_domain_max = ti.Vector.field(2, dtype=ti.f64, shape=())
         self.level_dx = ti.field(dtype=ti.f64, shape=self.num_levels)
         self.level_inv_dx = ti.field(dtype=ti.f64, shape=self.num_levels)
+        # Dynamic refinement criterion
+        self.refinement_criterion = str(getattr(config, 'AMR_REFINEMENT_CRITERION', 'platform'))
+        self._initial_criterion_center = None  # set on first update_dynamic_refinement call
         self.region_min.from_numpy(self.region_min_np.astype(np.float64))
         self.region_max.from_numpy(self.region_max_np.astype(np.float64))
         self.origin.from_numpy(self.origin_np.astype(np.float64))
@@ -138,6 +141,13 @@ class QuadtreeGrid2D:
         self.leaf_count = len(self.leaf_level)
         self._validate_leaf_tiling()
 
+        # Platform penalty cache: recompute the B-spline mass stencil only
+        # when the platform has moved by a meaningful fraction of the finest
+        # cell.  Between updates, a GPU kernel reuses the cached mass and
+        # scales it by the current platform velocity for the momentum.
+        self._platform_penalty_position_cache = None
+        self._platform_penalty_threshold = 0.25 * self.dx[-1]
+
     def _add_penalty_quadrature(self, mass, momentum, level, x_q, switch, wall_velocity, weight):
         dx = self.dx[level]
         fx = (x_q - self.origin_np[level]) / dx
@@ -158,13 +168,41 @@ class QuadtreeGrid2D:
                     momentum[I[0], I[1]] += contribution * switch * wall_velocity
 
     def _add_penalty_segment(self, mass, momentum, level, start, end, switch, wall_velocity):
-        length = float(np.linalg.norm(end - start))
-        count = max(1, int(math.ceil(length / self.dx[level])))
-        for cell in range(count):
-            for xi in (0.5 - 0.5 / math.sqrt(3.0), 0.5 + 0.5 / math.sqrt(3.0)):
-                point = start + (cell + xi) * (end - start) / count
-                weight = 0.5 * length / (count * self.dx[level])
-                self._add_penalty_quadrature(mass, momentum, level, point, switch, wall_velocity, weight)
+        dx = self.dx[level]
+        segment = end - start
+        length = float(np.linalg.norm(segment))
+        count = max(1, int(math.ceil(length / dx)))
+        weight = 0.5 * length / (count * dx)
+        # Vectorize over all quadrature points (count cells × 2 quad points).
+        xis = np.array([0.5 - 0.5 / math.sqrt(3.0), 0.5 + 0.5 / math.sqrt(3.0)])
+        cells = np.arange(count, dtype=np.float64)
+        # points shape: (count, 2, 2) → (count*2, 2) [cell, quad_point, xy]
+        points = start[None, None, :] + (cells[:, None, None] + xis[None, :, None]) * segment[None, None, :] / count
+        points = points.reshape(-1, 2)
+        fx = (points - self.origin_np[level][None, :]) / dx
+        base = np.floor(fx - 0.5).astype(np.int32)
+        d = fx - base
+        w = np.stack([
+            0.5 * (1.5 - d) ** 2,
+            0.75 - (d - 1.0) ** 2,
+            0.5 * (d - 0.5) ** 2,
+        ], axis=-1)  # (N, 2, 3)
+        beta = config.AMR_BOUNDARY_PENALTY_NORMAL * config.RHO_0 * dx ** 2
+        contrib = beta * weight
+        switch = np.asarray(switch, dtype=np.float64)
+        wall_velocity = np.asarray(wall_velocity, dtype=np.float64)
+        for i in range(3):
+            for j in range(3):
+                I = base + np.array([i, j], dtype=np.int32)  # (N, 2)
+                valid = (I[:, 0] >= 0) & (I[:, 0] < self.res_x[level]) & (I[:, 1] >= 0) & (I[:, 1] < self.res_y[level])
+                if not np.any(valid):
+                    continue
+                Iv = I[valid]
+                wx = w[valid, 0, i]
+                wy = w[valid, 1, j]
+                c = contrib * wx * wy  # (Nv,)
+                np.add.at(mass, (Iv[:, 0], Iv[:, 1]), c[:, None] * switch)
+                np.add.at(momentum, (Iv[:, 0], Iv[:, 1]), c[:, None] * switch * wall_velocity)
 
     def _build_domain_boundary_mass(self):
         masses = [np.zeros((*shape, 2), dtype=np.float64) for shape in self.res]
@@ -263,8 +301,9 @@ class QuadtreeGrid2D:
     def _snap_dynamic_shift(self, displacement, spacing):
         return np.copysign(np.floor(np.abs(displacement) / spacing + 0.5), displacement) * spacing
 
-    def _level_dynamic_shifts(self, t):
-        displacement, _ = self._platform_motion_numpy(t)
+    def _shifts_for_displacement(self, displacement):
+        """Compute per-level shifts for a given displacement vector, respecting
+        parent-child nesting and domain bounds."""
         shifts = np.zeros((self.num_levels, 2), dtype=np.float64)
         for level in range(1, self.num_levels):
             spacing = self.dx[level - 1]
@@ -279,6 +318,55 @@ class QuadtreeGrid2D:
                 raise ValueError(f"Dynamic level {level} cannot remain nested inside its parent")
             shifts[level] = np.minimum(np.maximum(desired, lower), upper)
         return shifts
+
+    def _level_dynamic_shifts(self, t):
+        """Legacy interface: compute shifts from platform motion at time t."""
+        displacement, _ = self._platform_motion_numpy(t)
+        return self._shifts_for_displacement(displacement)
+
+    def _compute_criterion_center(self, particles):
+        """Compute the mass-weighted centroid of particles that exceed the
+        configured refinement criterion threshold.
+
+        Returns None if no particles exceed the threshold (e.g. at rest).
+        """
+        n = particles.n_active()
+        if n == 0:
+            return None
+        x = particles.x.to_numpy()[:n]
+        mass = particles.mass.to_numpy()[:n]
+        criterion = self.refinement_criterion
+
+        if criterion == "platform":
+            # Platform criterion is handled by the caller via _platform_motion_numpy
+            return None
+
+        # Build a weight mask for the selected criterion
+        weights = np.zeros(n, dtype=np.float64)
+        if criterion in ("velocity", "combined"):
+            v = particles.v.to_numpy()[:n]
+            speed = np.linalg.norm(v, axis=1)
+            threshold = float(getattr(config, 'AMR_REFINEMENT_VELOCITY_FRACTION', 0.05)) * float(getattr(config, 'V_MAX_ESTIMATE', 1.0))
+            mask = speed > threshold
+            weights[mask] += mass[mask] * speed[mask]
+        if criterion in ("pressure", "combined"):
+            p = particles.pressure.to_numpy()[:n]
+            threshold = float(getattr(config, 'AMR_REFINEMENT_PRESSURE_FRACTION', 0.01)) * float(config.RHO_0 * config.C_0 ** 2)
+            mask = p > threshold
+            weights[mask] += mass[mask] * p[mask]
+        if criterion in ("deformation", "combined"):
+            F = particles.F.to_numpy()[:n]
+            J = np.linalg.det(F)
+            deformation = np.abs(J - 1.0)
+            threshold = float(getattr(config, 'AMR_REFINEMENT_DEFORMATION_THRESHOLD', 0.01))
+            mask = deformation > threshold
+            weights[mask] += mass[mask] * deformation[mask]
+
+        total_weight = weights.sum()
+        if total_weight < 1e-15:
+            return None
+        center = (weights[:, None] * x).sum(axis=0) / total_weight
+        return center
 
     @ti.func
     def _platform_motion(self, t: ti.f64):
@@ -299,10 +387,22 @@ class QuadtreeGrid2D:
             displacement = velocity * (stop_time + 0.5 * decel_time)
         return displacement, velocity_out
 
-    def update_dynamic_refinement(self, t):
+    def update_dynamic_refinement(self, t, particles=None):
         if not self.dynamic_refinement:
             return False
-        shifts = self._level_dynamic_shifts(t)
+        # Compute the displacement vector based on the configured criterion
+        if self.refinement_criterion == "platform" or particles is None:
+            displacement, _ = self._platform_motion_numpy(t)
+        else:
+            center = self._compute_criterion_center(particles)
+            if center is None:
+                # No particles exceed the threshold yet — fall back to platform
+                displacement, _ = self._platform_motion_numpy(t)
+            else:
+                if self._initial_criterion_center is None:
+                    self._initial_criterion_center = center.copy()
+                displacement = center - self._initial_criterion_center
+        shifts = self._shifts_for_displacement(displacement)
         if np.allclose(shifts, self.level_refinement_shift_np, rtol=0.0, atol=1e-12):
             return False
         self.level_refinement_shift_np = shifts
@@ -314,6 +414,8 @@ class QuadtreeGrid2D:
         self.origin.from_numpy(self.origin_np)
         self.level_refinement_shift.from_numpy(shifts)
         self.refinement_shift[None] = shifts[-1]
+        self._rebuild_dynamic_domain_boundary_mass()
+        self._platform_penalty_position_cache = None
         return True
 
     @ti.func
@@ -362,77 +464,82 @@ class QuadtreeGrid2D:
                 point = start + (ti.cast(cell, ti.f64) + xi) * segment / ti.cast(count, ti.f64)
                 self._add_dynamic_penalty_quadrature(level, point, switch, wall_velocity, weight)
 
-    @ti.func
-    def _add_dynamic_rectangular_penalty(self, level: ti.template(), x_min, x_max, y_min, y_max, velocity):
-        horizontal = ti.Vector([ti.cast(0.0, ti.f64), ti.cast(1.0, ti.f64)])
-        vertical = ti.Vector([ti.cast(1.0, ti.f64), ti.cast(0.0, ti.f64)])
-        self._add_dynamic_penalty_segment(
-            level, ti.Vector([x_min, y_min]), ti.Vector([x_max, y_min]), horizontal, velocity,
-        )
-        self._add_dynamic_penalty_segment(
-            level, ti.Vector([x_min, y_max]), ti.Vector([x_max, y_max]), horizontal, velocity,
-        )
-        self._add_dynamic_penalty_segment(
-            level, ti.Vector([x_min, y_min]), ti.Vector([x_min, y_max]), vertical, velocity,
-        )
-        self._add_dynamic_penalty_segment(
-            level, ti.Vector([x_max, y_min]), ti.Vector([x_max, y_max]), vertical, velocity,
-        )
+    def _rebuild_dynamic_domain_boundary_mass(self):
+        """Recompute domain boundary penalty mass on CPU after a dynamic grid shift.
 
-    @ti.kernel
+        The precomputed ``domain_boundary_mass`` from ``__init__`` reflects the
+        initial refinement geometry.  When the refinement window moves, the
+        faces that coincide with the domain boundary change, so the cached
+        mass is stale.  This method rebuilds it from the current
+        ``region_min_np`` / ``region_max_np`` / ``origin_np`` and uploads the
+        result, allowing the fast GPU ``initialize_penalty_mass`` kernel to be
+        reused every step instead of the serial dynamic kernel.
+        """
+        masses = [np.zeros((*shape, 2), dtype=np.float64) for shape in self.res]
+        zero_momentum = [np.zeros_like(mass) for mass in masses]
+        zero_velocity = np.zeros(2, dtype=np.float64)
+        for level in range(self.num_levels):
+            minimum = self.region_min_np[level]
+            maximum = self.region_max_np[level]
+            tol = 0.5 * self.dx[level]
+            if minimum[1] <= self.domain_min[1] + tol:
+                self._add_penalty_segment(
+                    masses[level], zero_momentum[level], level,
+                    np.array([minimum[0], self.domain_min[1]]),
+                    np.array([maximum[0], self.domain_min[1]]),
+                    np.array([0.0, 1.0]), zero_velocity,
+                )
+            if maximum[1] >= self.domain_max[1] - tol:
+                self._add_penalty_segment(
+                    masses[level], zero_momentum[level], level,
+                    np.array([minimum[0], self.domain_max[1]]),
+                    np.array([maximum[0], self.domain_max[1]]),
+                    np.array([0.0, 1.0]), zero_velocity,
+                )
+            if minimum[0] <= self.domain_min[0] + tol:
+                self._add_penalty_segment(
+                    masses[level], zero_momentum[level], level,
+                    np.array([self.domain_min[0], minimum[1]]),
+                    np.array([self.domain_min[0], maximum[1]]),
+                    np.array([1.0, 0.0]), zero_velocity,
+                )
+            if maximum[0] >= self.domain_max[0] - tol:
+                self._add_penalty_segment(
+                    masses[level], zero_momentum[level], level,
+                    np.array([self.domain_max[0], minimum[1]]),
+                    np.array([self.domain_max[0], maximum[1]]),
+                    np.array([1.0, 0.0]), zero_velocity,
+                )
+        for field, values in zip(self.domain_boundary_mass, masses):
+            field.from_numpy(values)
+
     def initialize_dynamic_penalty_mass(self):
-        zero_velocity = ti.Vector.zero(ti.f64, 2)
-        horizontal = ti.Vector([ti.cast(0.0, ti.f64), ti.cast(1.0, ti.f64)])
-        vertical = ti.Vector([ti.cast(1.0, ti.f64), ti.cast(0.0, ti.f64)])
-        domain_min = self.dynamic_domain_min[None]
-        domain_max = self.dynamic_domain_max[None]
-        for level in ti.static(range(self.num_levels)):
-            minimum = self.region_min[level]
-            maximum = self.region_max[level]
-            tolerance = 0.5 * self.level_dx[level]
-            if minimum[1] <= domain_min[1] + tolerance:
-                self._add_dynamic_penalty_segment(
-                    level,
-                    ti.Vector([minimum[0], domain_min[1]]),
-                    ti.Vector([maximum[0], domain_min[1]]),
-                    horizontal,
-                    zero_velocity,
-                )
-            if maximum[1] >= domain_max[1] - tolerance:
-                self._add_dynamic_penalty_segment(
-                    level,
-                    ti.Vector([minimum[0], domain_max[1]]),
-                    ti.Vector([maximum[0], domain_max[1]]),
-                    horizontal,
-                    zero_velocity,
-                )
-            if minimum[0] <= domain_min[0] + tolerance:
-                self._add_dynamic_penalty_segment(
-                    level,
-                    ti.Vector([domain_min[0], minimum[1]]),
-                    ti.Vector([domain_min[0], maximum[1]]),
-                    vertical,
-                    zero_velocity,
-                )
-            if maximum[0] >= domain_max[0] - tolerance:
-                self._add_dynamic_penalty_segment(
-                    level,
-                    ti.Vector([domain_max[0], minimum[1]]),
-                    ti.Vector([domain_max[0], maximum[1]]),
-                    vertical,
-                    zero_velocity,
-                )
+        self.initialize_penalty_mass()
 
-    @ti.kernel
-    def add_moving_platform_penalty_mass_gpu(self, t: ti.f64):
-        displacement, velocity = self._platform_motion(t)
-        bounds = self.platform_bounds[None]
-        x_min = bounds[0] + displacement[0]
-        x_max = bounds[1] + displacement[0]
-        y_min = bounds[2] + displacement[1]
-        y_max = bounds[3] + displacement[1]
-        for level in ti.static(range(self.num_levels)):
-            self._add_dynamic_rectangular_penalty(level, x_min, x_max, y_min, y_max, velocity)
+    def add_cached_moving_platform_penalty(self, t):
+        """Add the moving platform penalty mass/momentum, caching the B-spline
+        mass stencil across steps where the platform has barely moved.
+
+        The platform displacement per timestep is typically orders of
+        magnitude smaller than the finest cell, so the mass distribution
+        changes negligibly.  We recompute it only when the platform has
+        moved by more than ``_platform_penalty_threshold`` since the last
+        update; between updates we reuse the cached ``moving_boundary_mass``
+        and scale it by the current platform velocity on the GPU.
+        """
+        displacement, velocity = self._platform_motion_numpy(t)
+        if (self._platform_penalty_position_cache is None
+                or np.linalg.norm(displacement - self._platform_penalty_position_cache)
+                > self._platform_penalty_threshold):
+            self.update_moving_platform_penalty_mass(t)
+            self._platform_penalty_position_cache = displacement.copy()
+        self.add_moving_penalty_mass_with_velocity(float(velocity[0]), float(velocity[1]))
+
+    def add_moving_platform_penalty_mass_gpu(self, t):
+        displacement, velocity = self._platform_motion_numpy(t)
+        self.update_moving_platform_penalty_mass(t)
+        self._platform_penalty_position_cache = displacement.copy()
+        self.add_moving_penalty_mass_with_velocity(float(velocity[0]), float(velocity[1]))
 
     def _default_refinement_box(self):
         width = float(getattr(config, 'AMR_FINE_REGION_WIDTH', min(0.002, self.domain_width)))
@@ -565,6 +672,15 @@ class QuadtreeGrid2D:
             for I in ti.grouped(self.m[level]):
                 self.boundary_mass[level][I] += self.moving_boundary_mass[level][I]
                 self.boundary_momentum[level][I] += self.moving_boundary_momentum[level][I]
+
+    @ti.kernel
+    def add_moving_penalty_mass_with_velocity(self, vx: ti.f64, vy: ti.f64):
+        velocity = ti.Vector([vx, vy])
+        for level in ti.static(range(self.num_levels)):
+            for I in ti.grouped(self.m[level]):
+                mass = self.moving_boundary_mass[level][I]
+                self.boundary_mass[level][I] += mass
+                self.boundary_momentum[level][I] += mass * velocity
 
     @ti.kernel
     def normalize_momentum(self):

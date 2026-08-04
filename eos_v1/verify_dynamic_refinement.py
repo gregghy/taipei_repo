@@ -153,6 +153,11 @@ assert np.allclose(grid.refinement_shift.to_numpy(), shift)
 assert n_before > 0 and n_after > 0
 assert np.isfinite(positions).all()
 assert np.all((particle_levels >= 0) & (particle_levels <= grid.max_level))
+platform_displacement, _ = grid._platform_motion_numpy(sample_time)
+platform_min = np.array([config.INT_MOVINGRECT_XMIN, config.INT_MOVINGRECT_YMIN]) + platform_displacement
+platform_max = np.array([config.INT_MOVINGRECT_XMAX, config.INT_MOVINGRECT_YMAX]) + platform_displacement
+inside_platform = np.all((positions > platform_min) & (positions < platform_max), axis=1)
+assert not np.any(inside_platform)
 assert np.isclose(mass_after, mass_before, rtol=1e-12, atol=1e-15)
 assert solver.particles.split_overflow[None] == 0
 solver.particles.split_overflow[None] = 1

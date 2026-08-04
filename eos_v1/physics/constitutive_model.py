@@ -70,6 +70,26 @@ def StressUsingWater_WithArtificialViscosity(F, C):
     return stress
 
 @ti.func
+def StressUsingWaterAdaptive(F, C, h):
+    """Water EoS with level-aware artificial viscosity for AMR.
+
+    Uses the local cell size ``h`` instead of the global ``config.DX`` so the
+    shock-capturing damping scales correctly on each refinement level.
+    """
+    J = ti.max(F.determinant(), 0.96)
+    K = config.C_0**2 * config.RHO_0
+    p_physics = ti.max(K * (1.0 / J - 1.0), 0.0)
+    strain_rate = 0.5 * (C + C.transpose())
+    div_v = strain_rate[0, 0] + strain_rate[1, 1]
+    identity = ti.Matrix.identity(ti.f64, 2)
+    q_art = ti.cast(0.0, ti.f64)
+    if div_v < 0.0:
+        q_art = -ALPHA_L * config.RHO_0 * config.C_0 * h * div_v
+        q_art += ALPHA_Q * config.RHO_0 * (h * div_v) ** 2
+    viscous_stress = 2.0 * VISCOSITY * (strain_rate - 0.5 * div_v * identity)
+    return -(p_physics + q_art) * identity + viscous_stress
+
+@ti.func
 def StressUsingBingham(F, C): 
     # 1. Physics Pressure from F (Stable!)
     J = ti.max(F.determinant(), 0.95)

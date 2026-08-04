@@ -44,6 +44,21 @@ AMR_INITIAL_FLUID_XMAX = AMR_DOMAIN_WIDTH
 AMR_INITIAL_FLUID_YMIN = 0.0
 AMR_INITIAL_FLUID_YMAX = AMR_DOMAIN_HEIGHT
 
+# --- Dynamic refinement criterion -------------------------------------------
+# When AMR_DYNAMIC_REFINEMENT is True, the finest patch follows a criterion
+# instead of being pinned.  Options:
+#   "platform"    – follow the immersed platform position (default)
+#   "velocity"    – follow the mass-weighted centroid of fast-moving particles
+#   "pressure"    – follow the mass-weighted centroid of high-pressure particles
+#   "deformation" – follow the mass-weighted centroid of highly deformed particles
+#   "combined"    – weighted union of velocity + pressure + deformation
+AMR_REFINEMENT_CRITERION = "platform"
+AMR_REFINEMENT_MARGIN = 0.02       # half-size of the finest box around the criterion center
+AMR_REFINEMENT_VELOCITY_FRACTION = 0.05   # threshold = fraction * V_MAX_ESTIMATE
+AMR_REFINEMENT_PRESSURE_FRACTION = 0.01   # threshold = fraction * RHO_0 * C_0^2
+AMR_REFINEMENT_DEFORMATION_THRESHOLD = 0.01  # |J - 1| above this triggers refinement
+AMR_DYNAMIC_REGRID_INTERVAL = 16   # re-evaluate criterion every N steps
+
 # =======================================================================
 # 2. GLOBAL GRID DISCRETIZATION
 # =======================================================================

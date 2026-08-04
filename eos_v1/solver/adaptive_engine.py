@@ -7,7 +7,12 @@ import taichi as ti
 import config
 from core.quadtree_grid import QuadtreeGrid2D
 from core.adaptive_particles import AdaptiveParticleSystem2D
-from physics.constitutive_model import StressUsingWater
+from physics.constitutive_model import StressUsingWaterAdaptive
+
+# Velocity clamp to prevent numerical blow-up.  Set well above any physical
+# velocity (platform speed ~0.05 m/s, max wave speed ~19 m/s) but low enough
+# to stop the positive-feedback loop before it overflows to inf/NaN.
+_V_CLAMP = 10.0 * float(getattr(config, 'MAX_WAVE_SPEED', 20.0))
 
 @ti.data_oriented
 class AdaptiveMPMSolver2D:
@@ -160,6 +165,40 @@ class AdaptiveMPMSolver2D:
                         effective_mass = self.grid.m[level][I] + self.grid.boundary_mass[level][I][axis]
                         self.grid.v[level][I][axis] += self.grid.f[level][I][axis] * config.DT / effective_mass
                     self.grid.v[level][I] *= damping
+                    # Clamp velocity to prevent numerical blow-up
+                    speed = self.grid.v[level][I].norm()
+                    if speed > _V_CLAMP:
+                        self.grid.v[level][I] = self.grid.v[level][I] * (_V_CLAMP / speed)
+
+    @ti.func
+    def _project_from_platform(self, x, level: ti.template(), t: float):
+        displacement, _ = self.grid._platform_motion(t)
+        bounds = self.grid.platform_bounds[None]
+        x_min = bounds[0] + displacement[0]
+        x_max = bounds[1] + displacement[0]
+        y_min = bounds[2] + displacement[1]
+        y_max = bounds[3] + displacement[1]
+        projected = x
+        if x[0] > x_min and x[0] < x_max and x[1] > y_min and x[1] < y_max:
+            distance = x[0] - x_min
+            axis = ti.cast(0, ti.i32)
+            side = ti.cast(-1.0, ti.f64)
+            if x_max - x[0] < distance:
+                distance = x_max - x[0]
+                side = 1.0
+            if x[1] - y_min < distance:
+                distance = x[1] - y_min
+                axis = 1
+                side = -1.0
+            if y_max - x[1] < distance:
+                axis = 1
+                side = 1.0
+            epsilon = 1e-6 * self.grid.level_dx[level]
+            if axis == 0:
+                projected[0] = x_min - epsilon if side < 0.0 else x_max + epsilon
+            else:
+                projected[1] = y_min - epsilon if side < 0.0 else y_max + epsilon
+        return projected
 
     @ti.func
     def _g2p_level(self, p, level: ti.template(), t: float):
@@ -176,14 +215,29 @@ class AdaptiveMPMSolver2D:
                 v_new += weight * v_I
                 B_new += weight * v_I.outer_product(dpos)
         C_new = B_new * (4.0 * self.grid.level_inv_dx[level] * self.grid.level_inv_dx[level])
+        # Clamp velocity and affine to prevent numerical blow-up
+        v_speed = v_new.norm()
+        if v_speed > _V_CLAMP:
+            v_new = v_new * (_V_CLAMP / v_speed)
+        c_norm = C_new.norm()
+        c_clamp = _V_CLAMP * self.grid.level_inv_dx[level]
+        if c_norm > c_clamp:
+            C_new = C_new * (c_clamp / c_norm)
         self.particles.v[p] = v_new
         self.particles.C[p] = C_new
         new_x = x_p + v_new * config.DT
+        if ti.static(config.ACTIVE_SCENARIO == "IMMERSED"):
+            new_x = self._project_from_platform(new_x, level, t)
+        clearance = 0.1 * self.grid.level_dx[level]
+        domain_min = self.grid.dynamic_domain_min[None]
+        domain_max = self.grid.dynamic_domain_max[None]
+        new_x[0] = ti.max(domain_min[0] + clearance, ti.min(new_x[0], domain_max[0] - clearance))
+        new_x[1] = ti.max(domain_min[1] + clearance, ti.min(new_x[1], domain_max[1] - clearance))
         self.particles.x[p] = new_x
         identity = ti.Matrix.identity(ti.f64, 2)
         F_new = (identity + C_new * config.DT) @ self.particles.F[p]
         self.particles.F[p] = F_new
-        stress_new = StressUsingWater(F_new, C_new)
+        stress_new = StressUsingWaterAdaptive(F_new, C_new, self.grid.level_dx[level])
         self.particles.stress[p] = stress_new
         J = ti.max(F_new.determinant(), 0.1)
         K = config.C_0**2 * config.RHO_0
@@ -235,19 +289,13 @@ class AdaptiveMPMSolver2D:
 
     def step(self, damping=1.0, current_time=0.0):
         if self.grid.dynamic_refinement and self._step_count % self.dynamic_regrid_interval == 0:
-            if self.grid.update_dynamic_refinement(current_time):
+            if self.grid.update_dynamic_refinement(current_time, self.particles):
                 self._adapt_particles(complete=True)
                 self._check_dynamic_split_capacity()
         self.grid.clear()
-        if self.grid.dynamic_refinement:
-            self.grid.initialize_dynamic_penalty_mass()
-            if config.ACTIVE_SCENARIO == "IMMERSED":
-                self.grid.add_moving_platform_penalty_mass_gpu(current_time)
-        else:
-            self.grid.initialize_penalty_mass()
-            if config.ACTIVE_SCENARIO == "IMMERSED":
-                self.grid.update_moving_platform_penalty_mass(current_time)
-                self.grid.add_moving_penalty_mass()
+        self.grid.initialize_penalty_mass()
+        if config.ACTIVE_SCENARIO == "IMMERSED":
+            self.grid.add_cached_moving_platform_penalty(current_time)
         self.p2g_APIC()
         self.grid.normalize_momentum()
         self.compute_forces()
