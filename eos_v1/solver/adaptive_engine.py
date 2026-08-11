@@ -287,6 +287,49 @@ class AdaptiveMPMSolver2D:
         for p in range(self.particles.active_count[None]):
             ti.atomic_add(counts[self.particles.level[p]], 1)
 
+    @ti.kernel
+    def compute_weight_sums(self, weight_sums: ti.template(), grad_sum_mags: ti.template()):
+        """For each active particle, compute the sum of B-spline weights and the
+        magnitude of the gradient-weight sum over its 3x3 stencil (only counting
+        in-bounds nodes).  Interior particles should have weight_sum == 1.0 and
+        grad_sum_mag == 0.0; deviations reveal partition-of-unity violations
+        caused by boundary clamping."""
+        for p in range(self.particles.active_count[None]):
+            particle_level = self.particles.level[p]
+            x_p = self.particles.x[p]
+            w_sum = 0.0
+            grad_sum = ti.Vector.zero(ti.f64, 2)
+            for level in ti.static(range(self.grid.num_levels)):
+                if level == particle_level:
+                    base, w0, w1, w2, dw0, dw1, dw2 = self._weights(level, x_p)
+                    for i, j in ti.static(ti.ndrange(3, 3)):
+                        I = base + ti.Vector([i, j])
+                        if self.grid.in_bounds(level, I):
+                            wx = self._weight_component(0, i, w0, w1, w2)
+                            wy = self._weight_component(1, j, w0, w1, w2)
+                            dwx = self._grad_component(0, i, dw0, dw1, dw2)
+                            dwy = self._grad_component(1, j, dw0, dw1, dw2)
+                            w_sum += wx * wy
+                            grad_sum += ti.Vector([dwx * wy, wx * dwy])
+            weight_sums[p] = w_sum
+            grad_sum_mags[p] = grad_sum.norm()
+
+    def check_partition_of_unity(self):
+        """Returns (w_min, w_max, w_mean, g_max, n_violated) for all active
+        particles.  w_* are weight-sum stats (ideal: 1.0), g_max is the worst
+        gradient-sum magnitude (ideal: 0.0), n_violated counts particles whose
+        weight sum deviates from 1.0 by more than 1e-10."""
+        n = self.particles.active_count[None]
+        if n == 0:
+            return (1.0, 1.0, 1.0, 0.0, 0)
+        w_sums = ti.field(dtype=ti.f64, shape=n)
+        g_mags = ti.field(dtype=ti.f64, shape=n)
+        self.compute_weight_sums(w_sums, g_mags)
+        w = w_sums.to_numpy()
+        g = g_mags.to_numpy()
+        n_violated = int((abs(w - 1.0) > 1e-10).sum())
+        return (float(w.min()), float(w.max()), float(w.mean()), float(g.max()), n_violated)
+
     def step(self, damping=1.0, current_time=0.0):
         if self.grid.dynamic_refinement and self._step_count % self.dynamic_regrid_interval == 0:
             if self.grid.update_dynamic_refinement(current_time, self.particles):

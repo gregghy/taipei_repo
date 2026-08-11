@@ -135,6 +135,9 @@ def main():
 
     # --- Phase 1: export initial state, then relax -------------------------
     report_particle_levels(solver, counts, "Initial")
+    w_min, w_max, w_mean, g_max, n_violated = solver.check_partition_of_unity()
+    print(f"Initial PoU: w=[{w_min:.12f},{w_max:.12f}] mean={w_mean:.12f}  "
+          f"g_max={g_max:.6e}  violated={n_violated}")
     export_frame(solver, 0, t=0.0)
 
     print(f"Relaxation ({RELAXATION_FRAMES} frames, damping={RELAXATION_DAMPING})...")
@@ -142,6 +145,9 @@ def main():
         for _ in range(config.SUBSTEPS):
             solver.step(damping=RELAXATION_DAMPING, current_time=0.0)
     report_particle_levels(solver, counts, "After relaxation")
+    w_min, w_max, w_mean, g_max, n_violated = solver.check_partition_of_unity()
+    print(f"Post-relax PoU: w=[{w_min:.12f},{w_max:.12f}] mean={w_mean:.12f}  "
+          f"g_max={g_max:.6e}  violated={n_violated}")
     export_frame(solver, 0, t=0.0)  # overwrite frame 0 with settled state
 
     # --- Phase 2: main simulation loop -------------------------------------
@@ -158,7 +164,11 @@ def main():
         if frame % REPORT_EVERY == 0 or frame == 1:
             report_particle_levels(solver, counts, f"Frame {frame}")
 
-        print(f"Frame {frame}/{TOTAL_FRAMES}  t={t:.4e}s")
+        # Partition-of-unity check: weight sum should be 1.0, grad sum should be 0.0
+        w_min, w_max, w_mean, g_max, n_violated = solver.check_partition_of_unity()
+        pou_tag = "OK" if n_violated == 0 else f"VIOLATED({n_violated})"
+        print(f"Frame {frame}/{TOTAL_FRAMES}  t={t:.4e}s  "
+              f"PoU: {pou_tag}  w=[{w_min:.12f},{w_max:.12f}] mean={w_mean:.12f}  g_max={g_max:.6e}")
 
     print("Done.")
 
