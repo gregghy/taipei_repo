@@ -27,14 +27,14 @@ class QuadtreeGrid2D:
         self.base_cells_y = int(getattr(config, 'AMR_BASE_CELLS_Y', config.N_CELL_HEIGHT))
         self.base_dx = float(getattr(config, 'AMR_BASE_DX', self.domain_width / self.base_cells_x))
         self.refine_buffer_cells = int(getattr(config, 'AMR_REFINEMENT_BUFFER_CELLS', 4))
-        self.dynamic_refinement = bool(getattr(config, 'AMR_DYNAMIC_REFINEMENT', False)) and config.ACTIVE_SCENARIO == "IMMERSED"
+        self.dynamic_refinement = bool(getattr(config, 'AMR_DYNAMIC_REFINEMENT', False))
         for name, extent in (('width', self.domain_width), ('height', self.domain_height)):
             n_cells = extent / self.base_dx
             if abs(n_cells - round(n_cells)) > 1e-6:
                 raise ValueError(f"Domain {name} {extent} must be an integer multiple of AMR_BASE_DX {self.base_dx}")
 
         if refinement_box is None:
-            if self.dynamic_refinement and config.ACTIVE_SCENARIO == "IMMERSED":
+            if self.dynamic_refinement and config.ACTIVE_SCENARIO in ("IMMERSED",):
                 refinement_box = self._moving_platform_refinement_box()
             else:
                 refinement_box = self._default_refinement_box()

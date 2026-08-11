@@ -39,6 +39,22 @@ AMR_SPLIT_PARTICLES = True
 AMR_PARTICLE_CAPACITY_FACTOR = 2.0
 AMR_ALLOW_LEVEL_PROMOTION_WITHOUT_SPLIT = False
 AMR_BOUNDARY_PENALTY_NORMAL = 1e4
+
+# --- Gradient-based adaptive refinement -------------------------------------
+# Particles with high velocity gradient |C|*dx or high |J-1| are split to
+# finer levels.  Each level halves the threshold, so the finest level captures
+# the sharpest gradients.  Set AMR_GRADIENT_REFINE to False to disable.
+AMR_GRADIENT_REFINE = True
+AMR_GRADIENT_REFINE_THRESHOLD = 0.1    # |C|*dx threshold for level 0
+AMR_GRADIENT_PRESSURE_THRESHOLD = 0.05  # |J-1| threshold for level 0
+# Cap the maximum level that gradient-based splitting can trigger.  This keeps
+# the particle count manageable: gradient-driven particles refine up to this
+# level, and finer levels are only used by the geometric refinement box.
+AMR_GRADIENT_MAX_LEVEL = 2
+# When >= 0, all particles start at this level regardless of quadtree leaf
+# structure.  Set to 0 for gradient-driven refinement (start coarse, split
+# on demand).  Set to -1 for the default (fill all leaf cells).
+AMR_INITIAL_PARTICLE_LEVEL = -1
 AMR_INITIAL_FLUID_XMIN = 0.0
 AMR_INITIAL_FLUID_XMAX = AMR_DOMAIN_WIDTH
 AMR_INITIAL_FLUID_YMIN = 0.0

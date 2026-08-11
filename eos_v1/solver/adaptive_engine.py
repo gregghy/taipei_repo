@@ -266,6 +266,12 @@ class AdaptiveMPMSolver2D:
         for _ in range(passes):
             self.particles.split_particles()
 
+    def _update_gradient_levels(self):
+        if getattr(config, 'AMR_GRADIENT_REFINE', True):
+            self.compute_gradient_levels()
+        else:
+            self.clear_gradient_levels()
+
     def _check_dynamic_split_capacity(self):
         overflow = int(self.particles.split_overflow[None])
         if not self.grid.dynamic_refinement or overflow == 0:
@@ -286,6 +292,46 @@ class AdaptiveMPMSolver2D:
             counts[level] = 0
         for p in range(self.particles.active_count[None]):
             ti.atomic_add(counts[self.particles.level[p]], 1)
+
+    @ti.kernel
+    def compute_gradient_levels(self):
+        """Compute per-particle refinement level based on velocity gradient |C|
+        and pressure gradient.  High-gradient particles get a higher target
+        level, driving adaptive splitting in the split_particles kernel.
+
+        The velocity-gradient criterion uses |C| * dx (strain rate * length =
+        dimensionless deformation rate).  Levels are assigned on a logarithmic
+        scale: each level halves the threshold, so level k is triggered when
+        |C| * dx > threshold / 2^k.  The maximum level is capped by
+        AMR_GRADIENT_MAX_LEVEL to keep the particle count manageable.
+        """
+        grad_threshold = ti.cast(config.AMR_GRADIENT_REFINE_THRESHOLD, ti.f64)
+        grad_max = ti.static(getattr(config, 'AMR_GRADIENT_MAX_LEVEL', self.grid.num_levels - 1))
+        for p in range(self.particles.active_count[None]):
+            lvl = self.particles.level[p]
+            dx = self.grid.level_dx[lvl]
+            C_norm = self.particles.C[p].norm()
+            deform = C_norm * dx
+            target = 0
+            for k in ti.static(range(self.grid.num_levels)):
+                if k <= grad_max:
+                    if deform > grad_threshold * (2.0 ** (-k)):
+                        target = k
+            J = self.particles.F[p].determinant()
+            p_grad = ti.abs(J - 1.0)
+            p_target = 0
+            p_threshold = ti.cast(config.AMR_GRADIENT_PRESSURE_THRESHOLD, ti.f64)
+            for k in ti.static(range(self.grid.num_levels)):
+                if k <= grad_max:
+                    if p_grad > p_threshold * (2.0 ** (-k)):
+                        p_target = k
+            self.particles.gradient_level[p] = ti.max(target, p_target)
+
+    @ti.kernel
+    def clear_gradient_levels(self):
+        """Reset all gradient levels to 0 (used when gradient refine is off)."""
+        for p in range(self.particles.active_count[None]):
+            self.particles.gradient_level[p] = 0
 
     @ti.kernel
     def compute_weight_sums(self, weight_sums: ti.template(), grad_sum_mags: ti.template()):
@@ -333,6 +379,7 @@ class AdaptiveMPMSolver2D:
     def step(self, damping=1.0, current_time=0.0):
         if self.grid.dynamic_refinement and self._step_count % self.dynamic_regrid_interval == 0:
             if self.grid.update_dynamic_refinement(current_time, self.particles):
+                self._update_gradient_levels()
                 self._adapt_particles(complete=True)
                 self._check_dynamic_split_capacity()
         self.grid.clear()
@@ -346,6 +393,7 @@ class AdaptiveMPMSolver2D:
         self.grid.fill_fine_boundary_velocities()
         self.g2p_APIC(current_time)
 
+        self._update_gradient_levels()
         self._adapt_particles()
         self._check_dynamic_split_capacity()
         self._step_count += 1

@@ -32,6 +32,7 @@ class AdaptiveParticleSystem2D:
         self.level = ti.field(dtype=ti.i32, shape=self.capacity)
         self.mass = ti.field(dtype=ti.f64, shape=self.capacity)
         self.volume0 = ti.field(dtype=ti.f64, shape=self.capacity)
+        self.gradient_level = ti.field(dtype=ti.i32, shape=self.capacity)
         self.active_count = ti.field(dtype=ti.i32, shape=())
         self.split_overflow = ti.field(dtype=ti.i32, shape=())
         # Native (fully refined) particle mass of each level, used to decide
@@ -63,6 +64,7 @@ class AdaptiveParticleSystem2D:
         self.level_tmp = ti.field(dtype=ti.i32, shape=self.capacity)
         self.mass_tmp = ti.field(dtype=ti.f64, shape=self.capacity)
         self.volume0_tmp = ti.field(dtype=ti.f64, shape=self.capacity)
+        self.gradient_level_tmp = ti.field(dtype=ti.i32, shape=self.capacity)
         self.x.from_numpy(self._pad(x_np))
         self.level.from_numpy(self._pad(level_np))
         self.mass.from_numpy(self._pad(mass_np))
@@ -83,23 +85,51 @@ class AdaptiveParticleSystem2D:
         fluid_xmax = float(getattr(config, 'AMR_INITIAL_FLUID_XMAX', self.grid.domain_max[0]))
         fluid_ymin = float(getattr(config, 'AMR_INITIAL_FLUID_YMIN', self.grid.domain_min[1]))
         fluid_ymax = float(getattr(config, 'AMR_INITIAL_FLUID_YMAX', self.grid.domain_max[1]))
+        # When AMR_INITIAL_PARTICLE_LEVEL is set, all particles start at that
+        # level regardless of the quadtree leaf structure.  This keeps the
+        # initial particle count low and lets the gradient-based split criterion
+        # refine particles on the fly where the physics demands it.
+        init_level = int(getattr(config, 'AMR_INITIAL_PARTICLE_LEVEL', -1))
         positions = []
         levels = []
         masses = []
         volumes = []
-        for cell_level, origin, dx in zip(self.grid.leaf_level, self.grid.leaf_origin, self.grid.leaf_size):
-            center = origin + 0.5 * dx
-            if center[0] < fluid_xmin or center[0] >= fluid_xmax or center[1] < fluid_ymin or center[1] >= fluid_ymax:
-                continue
+        if init_level >= 0:
+            # Start all particles at the specified base level
+            dx = self.grid.dx[init_level]
+            origin = self.grid.region_min_np[init_level]
+            region_max = self.grid.region_max_np[init_level]
             spacing = dx / ppc_axis
             volume = dx * dx / (ppc_axis * ppc_axis)
             mass = volume * float(config.RHO_0)
-            for i in range(ppc_axis):
-                for j in range(ppc_axis):
-                    positions.append(origin + np.array([(i + 0.5) * spacing, (j + 0.5) * spacing], dtype=np.float64))
-                    levels.append(cell_level)
-                    masses.append(mass)
-                    volumes.append(volume)
+            nx = int(round((region_max[0] - origin[0]) / dx))
+            ny = int(round((region_max[1] - origin[1]) / dx))
+            for i in range(nx):
+                for j in range(ny):
+                    cell_origin = origin + np.array([i * dx, j * dx], dtype=np.float64)
+                    center = cell_origin + 0.5 * dx
+                    if center[0] < fluid_xmin or center[0] >= fluid_xmax or center[1] < fluid_ymin or center[1] >= fluid_ymax:
+                        continue
+                    for pi in range(ppc_axis):
+                        for pj in range(ppc_axis):
+                            positions.append(cell_origin + np.array([(pi + 0.5) * spacing, (pj + 0.5) * spacing], dtype=np.float64))
+                            levels.append(init_level)
+                            masses.append(mass)
+                            volumes.append(volume)
+        else:
+            for cell_level, origin, dx in zip(self.grid.leaf_level, self.grid.leaf_origin, self.grid.leaf_size):
+                center = origin + 0.5 * dx
+                if center[0] < fluid_xmin or center[0] >= fluid_xmax or center[1] < fluid_ymin or center[1] >= fluid_ymax:
+                    continue
+                spacing = dx / ppc_axis
+                volume = dx * dx / (ppc_axis * ppc_axis)
+                mass = volume * float(config.RHO_0)
+                for i in range(ppc_axis):
+                    for j in range(ppc_axis):
+                        positions.append(origin + np.array([(i + 0.5) * spacing, (j + 0.5) * spacing], dtype=np.float64))
+                        levels.append(cell_level)
+                        masses.append(mass)
+                        volumes.append(volume)
         return (
             np.array(positions, dtype=np.float64),
             np.array(levels, dtype=np.int32),
@@ -123,16 +153,19 @@ class AdaptiveParticleSystem2D:
 
     @ti.kernel
     def split_particles(self):
-        # Promote particles that moved into a finer region. A particle that is
-        # still coarser than its target level is split into 4 children (one
-        # level at a time, mass/volume conserved); particles that are already
-        # at (or below) the native mass of the target level are re-assigned
-        # without splitting so repeated interface crossings cannot refine
-        # particles without bound.
+        # Promote particles that moved into a finer region OR that have high
+        # velocity/pressure gradients.  When AMR_GRADIENT_REFINE is True, the
+        # target level is driven by the gradient criterion (not the geometric
+        # finest_level_at), so particles only split where gradients are high.
+        # When False, the original geometric behavior is used.
+        use_gradient = ti.static(getattr(config, 'AMR_GRADIENT_REFINE', True))
         n_before = self.active_count[None]
         for p in range(n_before):
             lvl = self.level[p]
-            target = self.grid.finest_level_at(self.x[p])
+            geo_target = self.grid.finest_level_at(self.x[p])
+            target = geo_target
+            if ti.static(use_gradient):
+                target = self.gradient_level[p]
             if target > lvl:
                 new_level = lvl + 1
                 if self.mass[p] > 1.5 * self.native_mass[new_level]:
@@ -267,6 +300,7 @@ class AdaptiveParticleSystem2D:
                 self.level_tmp[q] = self.level[p]
                 self.mass_tmp[q] = self.mass[p]
                 self.volume0_tmp[q] = self.volume0[p]
+                self.gradient_level_tmp[q] = self.gradient_level[p]
 
     @ti.kernel
     def _apply_compaction(self):
@@ -281,6 +315,7 @@ class AdaptiveParticleSystem2D:
             self.level[p] = self.level_tmp[p]
             self.mass[p] = self.mass_tmp[p]
             self.volume0[p] = self.volume0_tmp[p]
+            self.gradient_level[p] = self.gradient_level_tmp[p]
         self.active_count[None] = n
 
     def merge_particles(self):
