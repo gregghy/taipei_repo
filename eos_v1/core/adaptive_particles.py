@@ -153,17 +153,14 @@ class AdaptiveParticleSystem2D:
 
     @ti.kernel
     def split_particles(self):
-        # Promote particles that moved into a finer region OR that have high
-        # velocity/pressure gradients.  When AMR_GRADIENT_REFINE is True, the
-        # target level is driven by the gradient criterion (not the geometric
-        # finest_level_at), so particles only split where gradients are high.
-        # When False, the original geometric behavior is used.
+        # Promote particles to a finer level.  When AMR_GRADIENT_REFINE is True,
+        # the target level comes from the gradient criterion only (no geometric
+        # split).  When False, the original geometric behavior is used.
         use_gradient = ti.static(getattr(config, 'AMR_GRADIENT_REFINE', True))
         n_before = self.active_count[None]
         for p in range(n_before):
             lvl = self.level[p]
-            geo_target = self.grid.finest_level_at(self.x[p])
-            target = geo_target
+            target = self.grid.finest_level_at(self.x[p])
             if ti.static(use_gradient):
                 target = self.gradient_level[p]
             if target > lvl:
@@ -231,8 +228,15 @@ class AdaptiveParticleSystem2D:
 
     @ti.kernel
     def _accumulate_merge_bins(self, level: ti.template()):
+        use_gradient = ti.static(getattr(config, 'AMR_GRADIENT_REFINE', True))
         for p in range(self.active_count[None]):
-            if self.level[p] == level and self.grid.finest_level_at(self.x[p]) < level:
+            should_merge = False
+            if self.level[p] == level:
+                geo_target = self.grid.finest_level_at(self.x[p])
+                if ti.static(use_gradient):
+                    geo_target = self.gradient_level[p]
+                should_merge = geo_target < level
+            if should_merge:
                 slot = self._merge_slot(level, self.x[p])
                 m = self.mass[p]
                 vol = self.volume0[p]
@@ -251,10 +255,13 @@ class AdaptiveParticleSystem2D:
 
     @ti.kernel
     def _finalize_merge_bins(self, level: ti.template()):
+        use_gradient = ti.static(getattr(config, 'AMR_GRADIENT_REFINE', True))
         parent = ti.static(level - 1)
         for p in range(self.active_count[None]):
             if self.level[p] == level:
                 target = self.grid.finest_level_at(self.x[p])
+                if ti.static(use_gradient):
+                    target = self.gradient_level[p]
                 if target < level:
                     slot = self._merge_slot(level, self.x[p])
                     m = self.merge_mass[slot]

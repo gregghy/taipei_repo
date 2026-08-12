@@ -295,24 +295,19 @@ class AdaptiveMPMSolver2D:
 
     @ti.kernel
     def compute_gradient_levels(self):
-        """Compute per-particle refinement level based on velocity gradient |C|.
+        """Compute per-particle refinement level based on velocity gradient.
 
-        The criterion is the dimensionless deformation rate:
+        The criterion is the velocity variation across one cell:
             deform = |C| * dx
-        where |C| is the Frobenius norm of the affine velocity gradient matrix
-        and dx is the cell size at the particle's current level.  This measures
-        how much the velocity field changes across one cell — high values
-        indicate sharp gradients (the collapsing front, impact zones, jets).
+        where |C| is the APIC affine velocity gradient norm and dx is the cell
+        size at the particle's current level.  This is level-independent
+        (C ~ v/dx so |C|*dx ~ v) and measures how much the velocity field
+        changes across one grid cell — the natural refinement indicator.
 
-        Levels are assigned on a logarithmic scale: level k is triggered when
-            deform > threshold / 2^k
-        so each finer level captures gradients twice as sharp.  The maximum
-        level is capped by AMR_GRADIENT_MAX_LEVEL to keep the particle count
-        manageable.
-
-        Note: we intentionally do NOT use |J-1| (volumetric deformation) as a
-        criterion because the initial hydrostatic state has J != 1 everywhere,
-        which would trigger refinement on frame 0 before any motion occurs.
+        Levels use doubling thresholds: level k fires when
+            deform > threshold * 2^k
+        so each finer level requires twice the velocity variation.  Capped at
+        AMR_GRADIENT_MAX_LEVEL to keep the particle count manageable.
         """
         grad_threshold = ti.cast(config.AMR_GRADIENT_REFINE_THRESHOLD, ti.f64)
         grad_max = ti.static(getattr(config, 'AMR_GRADIENT_MAX_LEVEL', self.grid.num_levels - 1))
@@ -324,7 +319,7 @@ class AdaptiveMPMSolver2D:
             target = 0
             for k in ti.static(range(self.grid.num_levels)):
                 if k <= grad_max:
-                    if deform > grad_threshold * (2.0 ** (-k)):
+                    if deform > grad_threshold * (2.0 ** k):
                         target = k
             self.particles.gradient_level[p] = target
 

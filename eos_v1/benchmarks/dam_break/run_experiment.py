@@ -55,9 +55,14 @@ config.AMR_DYNAMIC_REFINEMENT = True
 config.AMR_PARTICLE_CAPACITY_FACTOR = 50.0
 
 # Enable gradient-based refinement (the key feature)
+# The criterion is |C| * dx (velocity variation across one cell), which is
+# level-independent and doesn't cascade when particles split.  Thresholds
+# double per level: level k fires when |C|*dx > threshold * 2^k.
+#   level 0: |C|*dx > 0.01  (moderate velocity variation)
+#   level 1: |C|*dx > 0.02  (sharp gradient — the collapsing front)
+#   level 2: |C|*dx > 0.04  (very sharp — splash, jet tip)
 config.AMR_GRADIENT_REFINE = True
-config.AMR_GRADIENT_REFINE_THRESHOLD = 0.1      # |C|*dx threshold for level 0
-config.AMR_GRADIENT_PRESSURE_THRESHOLD = 0.05    # |J-1| threshold for level 0
+config.AMR_GRADIENT_REFINE_THRESHOLD = 0.01      # |C|*dx threshold for level 0
 config.AMR_GRADIENT_MAX_LEVEL = 2                # cap gradient refinement at level 2
 
 # Start ALL particles at the coarse base level (level 0).  The gradient-based
@@ -103,9 +108,9 @@ refinement_box = ((domain_min_x, domain_min_y), (domain_max_x, domain_max_y))
 # ---------------------------------------------------------------------------
 # Simulation parameters
 # ---------------------------------------------------------------------------
-TOTAL_FRAMES = 300
-EXPORT_EVERY = 3
-REPORT_EVERY = 30
+TOTAL_FRAMES = 100
+EXPORT_EVERY = 1
+REPORT_EVERY = 10
 
 # ---------------------------------------------------------------------------
 # Imports
