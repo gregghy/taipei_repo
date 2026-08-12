@@ -295,15 +295,24 @@ class AdaptiveMPMSolver2D:
 
     @ti.kernel
     def compute_gradient_levels(self):
-        """Compute per-particle refinement level based on velocity gradient |C|
-        and pressure gradient.  High-gradient particles get a higher target
-        level, driving adaptive splitting in the split_particles kernel.
+        """Compute per-particle refinement level based on velocity gradient |C|.
 
-        The velocity-gradient criterion uses |C| * dx (strain rate * length =
-        dimensionless deformation rate).  Levels are assigned on a logarithmic
-        scale: each level halves the threshold, so level k is triggered when
-        |C| * dx > threshold / 2^k.  The maximum level is capped by
-        AMR_GRADIENT_MAX_LEVEL to keep the particle count manageable.
+        The criterion is the dimensionless deformation rate:
+            deform = |C| * dx
+        where |C| is the Frobenius norm of the affine velocity gradient matrix
+        and dx is the cell size at the particle's current level.  This measures
+        how much the velocity field changes across one cell — high values
+        indicate sharp gradients (the collapsing front, impact zones, jets).
+
+        Levels are assigned on a logarithmic scale: level k is triggered when
+            deform > threshold / 2^k
+        so each finer level captures gradients twice as sharp.  The maximum
+        level is capped by AMR_GRADIENT_MAX_LEVEL to keep the particle count
+        manageable.
+
+        Note: we intentionally do NOT use |J-1| (volumetric deformation) as a
+        criterion because the initial hydrostatic state has J != 1 everywhere,
+        which would trigger refinement on frame 0 before any motion occurs.
         """
         grad_threshold = ti.cast(config.AMR_GRADIENT_REFINE_THRESHOLD, ti.f64)
         grad_max = ti.static(getattr(config, 'AMR_GRADIENT_MAX_LEVEL', self.grid.num_levels - 1))
@@ -317,15 +326,7 @@ class AdaptiveMPMSolver2D:
                 if k <= grad_max:
                     if deform > grad_threshold * (2.0 ** (-k)):
                         target = k
-            J = self.particles.F[p].determinant()
-            p_grad = ti.abs(J - 1.0)
-            p_target = 0
-            p_threshold = ti.cast(config.AMR_GRADIENT_PRESSURE_THRESHOLD, ti.f64)
-            for k in ti.static(range(self.grid.num_levels)):
-                if k <= grad_max:
-                    if p_grad > p_threshold * (2.0 ** (-k)):
-                        p_target = k
-            self.particles.gradient_level[p] = ti.max(target, p_target)
+            self.particles.gradient_level[p] = target
 
     @ti.kernel
     def clear_gradient_levels(self):

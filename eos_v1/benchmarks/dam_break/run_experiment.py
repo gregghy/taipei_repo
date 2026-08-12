@@ -150,7 +150,7 @@ def main():
     print(f"Dam geometry: width={DAM_WIDTH:.4f}, height={DAM_HEIGHT:.4f}")
     print(f"Gradient thresholds: velocity={config.AMR_GRADIENT_REFINE_THRESHOLD}, "
           f"pressure={config.AMR_GRADIENT_PRESSURE_THRESHOLD}")
-    print(f"Initial refinement box (tiny): x=[{refinement_box[0][0]:.4f}, {refinement_box[1][0]:.4f}], "
+    print(f"Initial refinement box (full domain): x=[{refinement_box[0][0]:.4f}, {refinement_box[1][0]:.4f}], "
           f"y=[{refinement_box[0][1]:.4f}, {refinement_box[1][1]:.4f}]")
     solver = AdaptiveMPMSolver2D(refinement_box=refinement_box)
 
