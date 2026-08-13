@@ -51,7 +51,7 @@ config.ACTIVE_SCENARIO = "DAM_BREAK"
 config.USE_ADAPTIVE_MPM = True
 config.DIM = 2
 config.AMR_MAX_LEVEL = 3
-config.AMR_DYNAMIC_REFINEMENT = True
+config.AMR_DYNAMIC_REFINEMENT = False
 config.AMR_PARTICLE_CAPACITY_FACTOR = 50.0
 
 # Enable gradient-based refinement (the key feature)
@@ -62,7 +62,7 @@ config.AMR_PARTICLE_CAPACITY_FACTOR = 50.0
 #   level 1: |C|*dx > 0.02  (sharp gradient — the collapsing front)
 #   level 2: |C|*dx > 0.04  (very sharp — splash, jet tip)
 config.AMR_GRADIENT_REFINE = True
-config.AMR_GRADIENT_REFINE_THRESHOLD = 0.01      # |C|*dx threshold for level 0
+config.AMR_GRADIENT_REFINE_THRESHOLD = 0.1      # |C|*dx threshold for level 0
 config.AMR_GRADIENT_MAX_LEVEL = 2                # cap gradient refinement at level 2
 
 # Start ALL particles at the coarse base level (level 0).  The gradient-based

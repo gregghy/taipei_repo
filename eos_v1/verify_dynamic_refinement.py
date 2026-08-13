@@ -42,8 +42,10 @@ config.AMR_GHOST_BAND_CELLS = 2
 config.AMR_PARTICLES_PER_CELL_AXIS = 2
 config.AMR_SPLIT_PARTICLES = True
 config.AMR_MERGE_PARTICLES = True
+config.AMR_MERGE_MIN_PARTICLES = 4
 config.AMR_PARTICLE_CAPACITY_FACTOR = 4.0
 config.AMR_DYNAMIC_REFINEMENT = True
+config.AMR_GRADIENT_REFINE = True
 config.AMR_DYNAMIC_REGRID_INTERVAL = 1
 config.AMR_PROCESS_MARGIN = 0.0015
 config.AMR_DYNAMIC_PLATFORM_MARGIN_Y = 0.002
@@ -139,8 +141,24 @@ assert probe_levels[1] == grid.max_level
 
 assert grid.update_dynamic_refinement(0.0)
 solver._adapt_particles(complete=True)
+
+
+def expected_particle_levels(points):
+    expected = np.zeros(points.shape[0], dtype=np.int32)
+    for level in range(1, grid.num_levels):
+        minimum = grid.region_min_np[level]
+        maximum = grid.region_max_np[level]
+        inside = np.all((points >= minimum) & (points < maximum), axis=1)
+        expected[inside] = level
+    return expected
+
+
 n_before = solver.particles.n_active()
+initial_positions = solver.particles.x.to_numpy()[:n_before]
+initial_levels = solver.particles.level.to_numpy()[:n_before]
 mass_before = solver.particles.mass.to_numpy()[:n_before].sum()
+assert np.array_equal(initial_levels, expected_particle_levels(initial_positions))
+assert np.any(initial_levels == grid.max_level)
 solver.step(current_time=0.2)
 first_shift = grid.refinement_shift.to_numpy()
 assert first_shift[0] > 0.0 and first_shift[1] < 0.0
@@ -153,6 +171,7 @@ assert np.allclose(grid.refinement_shift.to_numpy(), shift)
 assert n_before > 0 and n_after > 0
 assert np.isfinite(positions).all()
 assert np.all((particle_levels >= 0) & (particle_levels <= grid.max_level))
+assert np.array_equal(particle_levels, expected_particle_levels(positions))
 platform_displacement, _ = grid._platform_motion_numpy(sample_time)
 platform_min = np.array([config.INT_MOVINGRECT_XMIN, config.INT_MOVINGRECT_YMIN]) + platform_displacement
 platform_max = np.array([config.INT_MOVINGRECT_XMAX, config.INT_MOVINGRECT_YMAX]) + platform_displacement

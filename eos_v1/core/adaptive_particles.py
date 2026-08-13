@@ -16,7 +16,7 @@ class AdaptiveParticleSystem2D:
         self.ppc_axis = int(getattr(config, 'AMR_PARTICLES_PER_CELL_AXIS', 2))
         self.split_enabled = bool(getattr(config, 'AMR_SPLIT_PARTICLES', True))
         self.merge_enabled = self.split_enabled and bool(getattr(config, 'AMR_MERGE_PARTICLES', True))
-        self.merge_min_particles = int(getattr(config, 'AMR_MERGE_MIN_PARTICLES', 2))
+        self.merge_min_particles = max(4, int(getattr(config, 'AMR_MERGE_MIN_PARTICLES', 4)))
         capacity_factor = float(getattr(config, 'AMR_PARTICLE_CAPACITY_FACTOR', 2.0))
         particle_data = self._build_particles()
         x_np, level_np, mass_np, volume_np = particle_data
@@ -151,18 +151,23 @@ class AdaptiveParticleSystem2D:
             self.stress[p] = ti.Matrix([[-p_hydro, 0.0], [0.0, -p_hydro]])
             self.pressure[p] = p_hydro
 
+    @ti.func
+    def _target_level(self, p):
+        geometric_target = self.grid.finest_level_at(self.x[p])
+        target = geometric_target
+        if ti.static(not self.grid.dynamic_refinement and getattr(config, 'AMR_GRADIENT_REFINE', True)):
+            target = ti.min(self.gradient_level[p], geometric_target)
+        return target
+
     @ti.kernel
     def split_particles(self):
         # Promote particles to a finer level.  When AMR_GRADIENT_REFINE is True,
         # the target level comes from the gradient criterion only (no geometric
         # split).  When False, the original geometric behavior is used.
-        use_gradient = ti.static(getattr(config, 'AMR_GRADIENT_REFINE', True))
         n_before = self.active_count[None]
         for p in range(n_before):
             lvl = self.level[p]
-            target = self.grid.finest_level_at(self.x[p])
-            if ti.static(use_gradient):
-                target = self.gradient_level[p]
+            target = self._target_level(p)
             if target > lvl:
                 new_level = lvl + 1
                 if self.mass[p] > 1.5 * self.native_mass[new_level]:
@@ -228,14 +233,10 @@ class AdaptiveParticleSystem2D:
 
     @ti.kernel
     def _accumulate_merge_bins(self, level: ti.template()):
-        use_gradient = ti.static(getattr(config, 'AMR_GRADIENT_REFINE', True))
         for p in range(self.active_count[None]):
             should_merge = False
             if self.level[p] == level:
-                geo_target = self.grid.finest_level_at(self.x[p])
-                if ti.static(use_gradient):
-                    geo_target = self.gradient_level[p]
-                should_merge = geo_target < level
+                should_merge = self._target_level(p) < level
             if should_merge:
                 slot = self._merge_slot(level, self.x[p])
                 m = self.mass[p]
@@ -255,13 +256,10 @@ class AdaptiveParticleSystem2D:
 
     @ti.kernel
     def _finalize_merge_bins(self, level: ti.template()):
-        use_gradient = ti.static(getattr(config, 'AMR_GRADIENT_REFINE', True))
         parent = ti.static(level - 1)
         for p in range(self.active_count[None]):
             if self.level[p] == level:
-                target = self.grid.finest_level_at(self.x[p])
-                if ti.static(use_gradient):
-                    target = self.gradient_level[p]
+                target = self._target_level(p)
                 if target < level:
                     slot = self._merge_slot(level, self.x[p])
                     m = self.merge_mass[slot]
