@@ -29,6 +29,8 @@ class AdaptiveParticleSystem2D:
         self.F = ti.Matrix.field(2, 2, dtype=ti.f64, shape=self.capacity)
         self.stress = ti.Matrix.field(2, 2, dtype=ti.f64, shape=self.capacity)
         self.pressure = ti.field(dtype=ti.f64, shape=self.capacity)
+        self.material = ti.field(dtype=ti.i32, shape=self.capacity)
+        self.Jp = ti.field(dtype=ti.f64, shape=self.capacity)
         self.level = ti.field(dtype=ti.i32, shape=self.capacity)
         self.mass = ti.field(dtype=ti.f64, shape=self.capacity)
         self.volume0 = ti.field(dtype=ti.f64, shape=self.capacity)
@@ -41,14 +43,17 @@ class AdaptiveParticleSystem2D:
         self.native_mass.from_numpy(np.array(
             [config.RHO_0 * (self.grid.dx[l] / self.ppc_axis) ** 2 for l in range(self.grid.num_levels)],
             dtype=np.float64))
-        slot_counts = [self.grid.res_x[l] * self.ppc_axis * self.grid.res_y[l] * self.ppc_axis
+        self.material_count = max(1, int(getattr(config, 'AMR_MATERIAL_COUNT', 1)))
+        slot_counts = [self.material_count * self.grid.res_x[l] * self.ppc_axis * self.grid.res_y[l] * self.ppc_axis
                        for l in range(max(self.grid.num_levels - 1, 1))]
         self.merge_slot_capacity = max(self.capacity, max(slot_counts) if slot_counts else self.capacity)
         self.merge_count = ti.field(dtype=ti.i32, shape=self.merge_slot_capacity)
+        self.merge_coarsen_count = ti.field(dtype=ti.i32, shape=self.merge_slot_capacity)
         self.merge_keep = ti.field(dtype=ti.i32, shape=self.merge_slot_capacity)
         self.merge_mass = ti.field(dtype=ti.f64, shape=self.merge_slot_capacity)
         self.merge_volume = ti.field(dtype=ti.f64, shape=self.merge_slot_capacity)
         self.merge_pressure = ti.field(dtype=ti.f64, shape=self.merge_slot_capacity)
+        self.merge_Jp = ti.field(dtype=ti.f64, shape=self.merge_slot_capacity)
         self.merge_x = ti.Vector.field(2, dtype=ti.f64, shape=self.merge_slot_capacity)
         self.merge_v = ti.Vector.field(2, dtype=ti.f64, shape=self.merge_slot_capacity)
         self.merge_C = ti.Matrix.field(2, 2, dtype=ti.f64, shape=self.merge_slot_capacity)
@@ -61,6 +66,8 @@ class AdaptiveParticleSystem2D:
         self.F_tmp = ti.Matrix.field(2, 2, dtype=ti.f64, shape=self.capacity)
         self.stress_tmp = ti.Matrix.field(2, 2, dtype=ti.f64, shape=self.capacity)
         self.pressure_tmp = ti.field(dtype=ti.f64, shape=self.capacity)
+        self.material_tmp = ti.field(dtype=ti.i32, shape=self.capacity)
+        self.Jp_tmp = ti.field(dtype=ti.f64, shape=self.capacity)
         self.level_tmp = ti.field(dtype=ti.i32, shape=self.capacity)
         self.mass_tmp = ti.field(dtype=ti.f64, shape=self.capacity)
         self.volume0_tmp = ti.field(dtype=ti.f64, shape=self.capacity)
@@ -150,6 +157,7 @@ class AdaptiveParticleSystem2D:
             self.F[p] = ti.Matrix([[1.0, 0.0], [0.0, J_init]])
             self.stress[p] = ti.Matrix([[-p_hydro, 0.0], [0.0, -p_hydro]])
             self.pressure[p] = p_hydro
+            self.Jp[p] = 1.0
 
     @ti.func
     def _target_level(self, p):
@@ -179,6 +187,8 @@ class AdaptiveParticleSystem2D:
                         F0 = self.F[p]
                         S0 = self.stress[p]
                         pr0 = self.pressure[p]
+                        material0 = self.material[p]
+                        Jp0 = self.Jp[p]
                         m_child = 0.25 * self.mass[p]
                         vol_child = 0.25 * self.volume0[p]
                         off = 0.25 * ti.sqrt(self.volume0[p])
@@ -195,6 +205,8 @@ class AdaptiveParticleSystem2D:
                             self.F[idx] = F0
                             self.stress[idx] = S0
                             self.pressure[idx] = pr0
+                            self.material[idx] = material0
+                            self.Jp[idx] = Jp0
                             self.level[idx] = new_level
                             self.mass[idx] = m_child
                             self.volume0[idx] = vol_child
@@ -205,26 +217,27 @@ class AdaptiveParticleSystem2D:
                     self.level[p] = new_level
 
     @ti.func
-    def _merge_slot(self, level: ti.template(), x):
-        parent = ti.static(level - 1)
-        slot_nx = ti.static(self.grid.res_x[parent] * self.ppc_axis)
-        slot_ny = ti.static(self.grid.res_y[parent] * self.ppc_axis)
-        spacing = self.grid.level_dx[parent] / ti.cast(self.ppc_axis, ti.f64)
-        fx = (x - self.grid.origin[parent]) / spacing
+    def _merge_slot(self, level: ti.template(), x, material):
+        slot_nx = ti.static(self.grid.res_x[level] * self.ppc_axis)
+        slot_ny = ti.static(self.grid.res_y[level] * self.ppc_axis)
+        spacing = self.grid.level_dx[level] / ti.cast(self.ppc_axis, ti.f64)
+        fx = (x - self.grid.origin[level]) / spacing
         si = ti.cast(ti.floor(fx[0]), ti.i32)
         sj = ti.cast(ti.floor(fx[1]), ti.i32)
         si = ti.max(0, ti.min(si, slot_nx - 1))
         sj = ti.max(0, ti.min(sj, slot_ny - 1))
-        return si * slot_ny + sj
+        return material * slot_nx * slot_ny + si * slot_ny + sj
 
     @ti.kernel
     def _clear_merge_bins(self):
         for i in self.merge_count:
             self.merge_count[i] = 0
+            self.merge_coarsen_count[i] = 0
             self.merge_keep[i] = self.capacity
             self.merge_mass[i] = 0.0
             self.merge_volume[i] = 0.0
             self.merge_pressure[i] = 0.0
+            self.merge_Jp[i] = 0.0
             self.merge_x[i] = ti.Vector.zero(ti.f64, 2)
             self.merge_v[i] = ti.Vector.zero(ti.f64, 2)
             self.merge_C[i] = ti.Matrix.zero(ti.f64, 2, 2)
@@ -232,20 +245,21 @@ class AdaptiveParticleSystem2D:
             self.merge_stress[i] = ti.Matrix.zero(ti.f64, 2, 2)
 
     @ti.kernel
-    def _accumulate_merge_bins(self, level: ti.template()):
+    def _accumulate_merge_bins(self, target_level: ti.template()):
         for p in range(self.active_count[None]):
-            should_merge = False
-            if self.level[p] == level:
-                should_merge = self._target_level(p) < level
-            if should_merge:
-                slot = self._merge_slot(level, self.x[p])
+            target = self._target_level(p)
+            if target == target_level and self.level[p] >= target_level:
+                slot = self._merge_slot(target_level, self.x[p], self.material[p])
                 m = self.mass[p]
                 vol = self.volume0[p]
                 ti.atomic_add(self.merge_count[slot], 1)
+                if self.level[p] > target_level:
+                    ti.atomic_add(self.merge_coarsen_count[slot], 1)
                 ti.atomic_min(self.merge_keep[slot], p)
                 ti.atomic_add(self.merge_mass[slot], m)
                 ti.atomic_add(self.merge_volume[slot], vol)
                 ti.atomic_add(self.merge_pressure[slot], vol * self.pressure[p])
+                ti.atomic_add(self.merge_Jp[slot], vol * self.Jp[p])
                 for a in ti.static(range(2)):
                     ti.atomic_add(self.merge_x[slot][a], m * self.x[p][a])
                     ti.atomic_add(self.merge_v[slot][a], m * self.v[p][a])
@@ -255,37 +269,31 @@ class AdaptiveParticleSystem2D:
                         ti.atomic_add(self.merge_stress[slot][a, b], vol * self.stress[p][a, b])
 
     @ti.kernel
-    def _finalize_merge_bins(self, level: ti.template()):
-        parent = ti.static(level - 1)
+    def _finalize_merge_bins(self, target_level: ti.template()):
         for p in range(self.active_count[None]):
-            if self.level[p] == level:
-                target = self._target_level(p)
-                if target < level:
-                    slot = self._merge_slot(level, self.x[p])
-                    m = self.merge_mass[slot]
-                    vol = self.merge_volume[slot]
-                    can_merge = self.merge_count[slot] >= ti.static(self.merge_min_particles)
-                    if m < 0.5 * self.native_mass[parent] or m > 1.5 * self.native_mass[parent]:
-                        can_merge = False
-                    if can_merge and vol > 0.0:
-                        if p == self.merge_keep[slot]:
-                            inv_m = 1.0 / m
-                            inv_vol = 1.0 / vol
-                            self.x[p] = self.merge_x[slot] * inv_m
-                            self.v[p] = self.merge_v[slot] * inv_m
-                            self.C[p] = self.merge_C[slot] * inv_m
-                            self.F[p] = self.merge_F[slot] * inv_vol
-                            self.stress[p] = self.merge_stress[slot] * inv_vol
-                            self.pressure[p] = self.merge_pressure[slot] * inv_vol
-                            self.level[p] = parent
-                            self.mass[p] = m
-                            self.volume0[p] = vol
-                        else:
-                            self.level[p] = -1
-                            self.mass[p] = 0.0
-                            self.volume0[p] = 0.0
+            target = self._target_level(p)
+            if target == target_level and self.level[p] >= target_level:
+                slot = self._merge_slot(target_level, self.x[p], self.material[p])
+                if self.merge_coarsen_count[slot] > 0:
+                    if p == self.merge_keep[slot]:
+                        m = self.merge_mass[slot]
+                        vol = self.merge_volume[slot]
+                        inv_m = 1.0 / m
+                        inv_vol = 1.0 / vol
+                        self.x[p] = self.merge_x[slot] * inv_m
+                        self.v[p] = self.merge_v[slot] * inv_m
+                        self.C[p] = self.merge_C[slot] * inv_m
+                        self.F[p] = self.merge_F[slot] * inv_vol
+                        self.stress[p] = self.merge_stress[slot] * inv_vol
+                        self.pressure[p] = self.merge_pressure[slot] * inv_vol
+                        self.Jp[p] = self.merge_Jp[slot] * inv_vol
+                        self.level[p] = target_level
+                        self.mass[p] = m
+                        self.volume0[p] = vol
                     else:
-                        self.level[p] = target
+                        self.level[p] = -1
+                        self.mass[p] = 0.0
+                        self.volume0[p] = 0.0
 
     @ti.kernel
     def _reset_compaction(self):
@@ -302,6 +310,8 @@ class AdaptiveParticleSystem2D:
                 self.F_tmp[q] = self.F[p]
                 self.stress_tmp[q] = self.stress[p]
                 self.pressure_tmp[q] = self.pressure[p]
+                self.material_tmp[q] = self.material[p]
+                self.Jp_tmp[q] = self.Jp[p]
                 self.level_tmp[q] = self.level[p]
                 self.mass_tmp[q] = self.mass[p]
                 self.volume0_tmp[q] = self.volume0[p]
@@ -317,6 +327,8 @@ class AdaptiveParticleSystem2D:
             self.F[p] = self.F_tmp[p]
             self.stress[p] = self.stress_tmp[p]
             self.pressure[p] = self.pressure_tmp[p]
+            self.material[p] = self.material_tmp[p]
+            self.Jp[p] = self.Jp_tmp[p]
             self.level[p] = self.level_tmp[p]
             self.mass[p] = self.mass_tmp[p]
             self.volume0[p] = self.volume0_tmp[p]
@@ -326,10 +338,10 @@ class AdaptiveParticleSystem2D:
     def merge_particles(self):
         if not self.merge_enabled or self.grid.num_levels <= 1:
             return
-        for level in range(self.grid.num_levels - 1, 0, -1):
+        for target_level in range(self.grid.max_level):
             self._clear_merge_bins()
-            self._accumulate_merge_bins(level)
-            self._finalize_merge_bins(level)
+            self._accumulate_merge_bins(target_level)
+            self._finalize_merge_bins(target_level)
         self._reset_compaction()
         self._scatter_compaction()
         self._apply_compaction()

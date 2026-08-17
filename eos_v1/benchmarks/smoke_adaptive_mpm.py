@@ -41,7 +41,7 @@ config.CFL = 0.1
 config.C_0 = 10.0 * math.sqrt(2.0 * config.G_MAG * config.AMR_DOMAIN_HEIGHT)
 config.DT = 1e-5
 
-ti.init(arch=ti.cpu)
+ti.init(arch=ti.gpu)
 
 from solver.adaptive_engine import AdaptiveMPMSolver2D
 

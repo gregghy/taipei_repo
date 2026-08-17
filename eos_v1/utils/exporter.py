@@ -54,7 +54,7 @@ import config
 
 #     print(f"Exported frame {frame_number} to {filename}")
 
-def write_vtk(frame_number, pos, pressure, velocity, output_dir="output"): # use polyvertex
+def write_vtk(frame_number, pos, pressure, velocity, output_dir="output", material=None): # use polyvertex
     """
     Exports particle positions, pressure, and velocity to a VTK file.
     Uses highly optimized POLYDATA / VERTICES for massive 3D point clouds.
@@ -69,6 +69,10 @@ def write_vtk(frame_number, pos, pressure, velocity, output_dir="output"): # use
     pos = np.where(np.isfinite(pos), pos, 0.0)
     pressure = np.where(np.isfinite(pressure), pressure, 0.0)
     velocity = np.where(np.isfinite(velocity), velocity, 0.0)
+    if material is not None:
+        material = np.asarray(material, dtype=np.int32)
+        if len(material) != num_particles:
+            raise ValueError("material must have one value per particle")
     
     with open(filename, 'w') as f:
         f.write("# vtk DataFile Version 3.0\n")
@@ -113,6 +117,11 @@ def write_vtk(frame_number, pos, pressure, velocity, output_dir="output"): # use
         else:
             for i in range(num_particles):
                 f.write(f"{velocity[i, 0]} {velocity[i, 1]} 0.0\n")
+        if material is not None:
+            f.write("SCALARS Material int 1\n")
+            f.write("LOOKUP_TABLE default\n")
+            for value in material:
+                f.write(f"{value}\n")
 
     print(f"Exported frame {frame_number} to {filename}")
 

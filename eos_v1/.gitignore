@@ -3,3 +3,7 @@
 
 # Stray empty files
 solver/co
+benchmarks/three_materials/three_materials_results.json
+benchmarks/three_materials/output/
+benchmarks/three_blocks/three_blocks_results.json
+benchmarks/three_blocks/output/

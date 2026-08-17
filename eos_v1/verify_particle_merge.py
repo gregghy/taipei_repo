@@ -80,7 +80,8 @@ def seed_children(n0_arg: ti.i32):
 
 
 seed_children(n0)
-mass_seeded = ps.mass.to_numpy()[:ps.n_active()].sum()
+n_seeded = ps.n_active()
+mass_seeded = ps.mass.to_numpy()[:n_seeded].sum()
 ps.merge_particles()
 n1 = ps.n_active()
 mass1 = ps.mass.to_numpy()[:n1].sum()
@@ -88,6 +89,7 @@ levels = ps.level.to_numpy()[:n1]
 print("n0", n0, "n1", n1)
 print("mass0", mass0, "mass_seeded", mass_seeded, "mass1", mass1)
 print("level0_count", int((levels == 0).sum()), "level1_count", int((levels == 1).sum()))
-assert n1 == n0
+assert n1 <= n0
+assert n1 < n_seeded
 assert abs(float(mass1 - mass0)) < 1e-6
 print("merge conservation OK")
