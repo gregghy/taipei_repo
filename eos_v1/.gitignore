@@ -7,3 +7,10 @@ benchmarks/three_materials/three_materials_results.json
 benchmarks/three_materials/output/
 benchmarks/three_blocks/three_blocks_results.json
 benchmarks/three_blocks/output/
+benchmarks/rotating_blocks/rotating_blocks_results.json
+benchmarks/rotating_blocks/output/
+benchmarks/freefall/output/
+benchmarks/dynamic_block/output/
+benchmarks/freefall_old/output/
+benchmarks/freefall_comparison/output/
+benchmarks/materials/output/

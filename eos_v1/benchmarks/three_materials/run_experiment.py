@@ -13,7 +13,7 @@ import taichi as ti
 import config
 from physics.constitutive_model import StressUsingWaterAdaptive
 from solver.adaptive_engine import AdaptiveMPMSolver2D
-from utils.exporter import write_boundary_vtk, write_vtk
+from utils.exporter import write_boundary_vtk, write_quadtree_grid_vtk, write_vtk
 
 COLUMN_MATERIAL_IDS = {"fluid": 0, "jelly": 1, "snow": 2}
 MATERIAL_NAMES = {0: "fluid", 1: "jelly", 2: "snow", 4: "solid_block"}
@@ -253,6 +253,7 @@ def run_case(mode, column_material_name, steps, export_every, drive_block=True):
     initialize_case(solver, COLUMN_MATERIAL_IDS[column_material_name])
     output_directory = os.path.join(os.path.dirname(__file__), "output", f"{mode}_{column_material_name}")
     write_boundary_vtk(0.0, 0.0, config.AMR_DOMAIN_WIDTH, config.AMR_DOMAIN_HEIGHT, output_dir=output_directory)
+    write_quadtree_grid_vtk(solver.grid, output_dir=output_directory)
     export_frame(solver, 0, output_directory)
     initial = material_summary(solver)
     t = 0.0

@@ -1,3 +1,11 @@
+"""Immersed-platform benchmark with velocity-gradient refinement.
+
+Same physical setup as sub_001 (a wide platform descends into a fluid pool
+under gravity), but refinement is driven by the per-particle velocity
+gradient ``deform = |C| * dx`` instead of a moving grid patch that follows
+the platform.  The refinement box is static and covers the full domain;
+particles split and merge locally based on the gradient criterion.
+"""
 import os
 import sys
 
@@ -14,25 +22,31 @@ config.ACTIVE_SCENARIO = "IMMERSED"
 config.USE_ADAPTIVE_MPM = True
 config.DIM = 2
 config.AMR_MAX_LEVEL = 3
-config.AMR_DYNAMIC_REFINEMENT = True
 config.AMR_PARTICLE_CAPACITY_FACTOR = 50.0
 
-# Use the mpm99 liquid constitutive model (SVD-based, no J clamp) instead of
-# StressUsingWaterAdaptive which clamps J to 0.96 and caps pressure at ~12 kPa.
-from benchmarks.freefall_comparison.mpm99_materials import (
-    apply_mpm99_properties,
-    create_mpm99_solver,
-)
+# Use the mpm99 liquid constitutive model (SVD-based, no J clamp).
+from benchmarks.freefall_comparison.mpm99_materials import apply_mpm99_properties
 apply_mpm99_properties("liquid")
 
-# Refinement criterion: "platform", "velocity", "pressure", "deformation", "combined"
-#   - "platform":    finest patch follows the immersed platform (default)
-#   - "velocity":    follows the mass-weighted centroid of fast particles
-#   - "pressure":    follows the mass-weighted centroid of high-pressure particles
-#   - "deformation": follows the mass-weighted centroid of deformed particles
-#   - "combined":    weighted union of velocity + pressure + deformation
-config.AMR_REFINEMENT_CRITERION = "platform"
-config.AMR_REFINEMENT_MARGIN = 0.02       # half-size of finest box around criterion center
+# --- Refinement: velocity-gradient (static grid, no moving patch) -----------
+# Measured deform = |C| * dx peaks around 0.07 in this scenario (platform
+# squeezing the fluid), so the split threshold must sit below that.  0.02
+# keeps the fluid coarse while at rest (deform < 0.007) and splits only the
+# fastest ~10% of particles once the platform starts compressing the pool.
+config.AMR_DYNAMIC_REFINEMENT = False   # grid stays fixed
+config.AMR_GRADIENT_REFINE = True       # split/merge by |C|*dx
+config.AMR_GRADIENT_REFINE_THRESHOLD = 0.02
+# Gradient refinement is capped at level 2.  With the full depth-3 cascade the
+# split noise amplifies at each level (|C| grows ~20x per generation near the
+# platform contact), which drives every particle to the finest level and
+# exhausts the particle capacity within ~10 frames.  Depth 2 refines the
+# squeezing region stably (measured: n 6000 -> ~89k, v_max < 0.65 m/s).
+config.AMR_GRADIENT_MAX_LEVEL = 2
+config.AMR_SPLIT_PARTICLES = True
+config.AMR_MERGE_PARTICLES = True
+config.AMR_MERGE_MIN_PARTICLES = 4
+config.AMR_MERGE_SPEED_LIMIT = 0.5      # only slow particles merge back
+config.AMR_INITIAL_PARTICLE_LEVEL = 0   # start coarse; split on gradient
 
 # Make the immersed platform ~2/3 of the domain width and center it.
 config.PLATFORM_WIDTH = 0.4 * config.GRID_WIDTH
@@ -40,39 +54,68 @@ config.FLUID_CENTER_X = (config.PADDING * config.DX) + (config.GRID_WIDTH / 2.0)
 config.INT_MOVINGRECT_XMIN = config.FLUID_CENTER_X - (config.PLATFORM_WIDTH / 2.0)
 config.INT_MOVINGRECT_XMAX = config.FLUID_CENTER_X + (config.PLATFORM_WIDTH / 2.0)
 
-# Build the initial refinement box from the criterion center + margin.
-# For "platform" criterion the center is the platform midpoint.
-# For physics criteria the initial center is computed from the initial particle
-# state (which is at rest, so it falls back to the platform center).
-# The margin is asymmetric in y: the platform only moves down, but the fluid
-# surface rises above the platform, so we need more headroom above than below.
-_margin = float(getattr(config, "AMR_REFINEMENT_MARGIN", 0.02))
-_margin_below = float(getattr(config, "AMR_REFINEMENT_MARGIN_BELOW", _margin))
-_margin_above = float(getattr(config, "AMR_REFINEMENT_MARGIN_ABOVE", _margin + 0.5 * config.MP_HEIGHT))
-_platform_cx = 0.5 * (config.INT_MOVINGRECT_XMIN + config.INT_MOVINGRECT_XMAX)
-_platform_hw = 0.5 * (config.INT_MOVINGRECT_XMAX - config.INT_MOVINGRECT_XMIN) + _margin
-_platform_ymin = config.INT_MOVINGRECT_YMIN - _margin_below
-_platform_ymax = config.INT_MOVINGRECT_YMAX + _margin_above
+# Static refinement box covering the full fluid domain.  With gradient
+# refinement the box just defines where fine grid levels exist; particles
+# anywhere inside can split up to AMR_MAX_LEVEL.
+_domain_xmin = config.PADDING * config.DX
+_domain_ymin = config.PADDING * config.DY
+_domain_xmax = _domain_xmin + config.GRID_WIDTH
+_domain_ymax = _domain_ymin + config.GRID_HEIGHT
 refinement_box = (
-    (_platform_cx - _platform_hw, _platform_ymin),
-    (_platform_cx + _platform_hw, _platform_ymax),
+    (_domain_xmin, _domain_ymin),
+    (_domain_xmax, _domain_ymax),
 )
 
 # ---------------------------------------------------------------------------
 # Simulation parameters
 # ---------------------------------------------------------------------------
-RELAXATION_FRAMES = 15
+RELAXATION_FRAMES = 5
 RELAXATION_DAMPING = 0.98
-TOTAL_FRAMES = 300
-EXPORT_EVERY = 1          # export every N frames
-REPORT_EVERY = 10         # print particle-level summary every N frames
+TOTAL_FRAMES = 200
+EXPORT_EVERY = 2          # export every N frames
+REPORT_EVERY = 20         # print particle-level summary every N frames
 
 # ---------------------------------------------------------------------------
 # Imports (after config overrides so they pick up the right values)
 # ---------------------------------------------------------------------------
 import physics.boundary as bnd
 from utils.exporter import write_vtk, write_boundary_vtk, WriteInteriorMoving
-from solver.adaptive_engine import AdaptiveMPMSolver2D  # noqa: F401 (base class, needed by create_mpm99_solver)
+from solver.adaptive_engine import AdaptiveMPMSolver2D  # noqa: F401 (base class)
+from benchmarks.freefall_comparison.mpm99_materials import MPM99LiquidSolver2D
+
+
+@ti.data_oriented
+class GradientHysteresisLiquidSolver2D(MPM99LiquidSolver2D):
+    """Liquid solver with hysteresis in the gradient refinement criterion.
+
+    deform = |C| * dx is level-dependent: after a split, dx halves so deform
+    halves, and without hysteresis the particle would immediately fall below
+    the next level's threshold and merge back (split/merge pulsing).  With
+    hysteresis, a particle at level k only demotes once deform drops below
+    10% of the threshold that promoted it.
+    """
+
+    @ti.kernel
+    def compute_gradient_levels(self):
+        grad_threshold = ti.cast(config.AMR_GRADIENT_REFINE_THRESHOLD, ti.f64)
+        grad_max = ti.static(getattr(config, 'AMR_GRADIENT_MAX_LEVEL', self.grid.num_levels - 1))
+        hysteresis = ti.cast(0.1, ti.f64)  # demote at 10% of promote threshold
+        for p in range(self.particles.active_count[None]):
+            lvl = self.particles.level[p]
+            dx = self.grid.level_dx[lvl]
+            C_norm = self.particles.C[p].norm()
+            deform = C_norm * dx
+            promote_target = 0
+            for k in ti.static(range(self.grid.num_levels)):
+                if k <= ti.static(grad_max):
+                    if deform > grad_threshold * (2.0 ** k):
+                        promote_target = k
+            target = promote_target
+            if lvl > promote_target:
+                demote_threshold = hysteresis * grad_threshold * (2.0 ** lvl)
+                if deform >= demote_threshold:
+                    target = lvl  # stay at current level
+            self.particles.gradient_level[p] = target
 
 output_directory = os.path.dirname(__file__)
 os.makedirs(output_directory, exist_ok=True)
@@ -106,7 +149,6 @@ def report_particle_levels(solver, counts, tag):
     print(
         f"{tag}: active={solver.particles.n_active()} "
         f"per_level={counts.to_numpy().tolist()} "
-        f"shift={solver.grid.level_refinement_shift_np[-1].tolist()} "
         f"box={solver.grid.region_min_np[-1].tolist()}..{solver.grid.region_max_np[-1].tolist()}"
     )
 
@@ -115,17 +157,12 @@ def main():
     ti.init(arch=ti.gpu, default_fp=ti.f64)
     bnd.init_boundary_fields()
 
-    print("Initializing immersed adaptive MPM solver...")
-    print(f"Refinement criterion: {config.AMR_REFINEMENT_CRITERION}")
+    print("Initializing immersed adaptive MPM solver (gradient refinement)...")
+    print(f"Refinement: gradient (threshold={config.AMR_GRADIENT_REFINE_THRESHOLD}, "
+          f"max_level={config.AMR_GRADIENT_MAX_LEVEL})")
     print(f"Refinement box: x=[{refinement_box[0][0]:.4f}, {refinement_box[1][0]:.4f}], "
           f"y=[{refinement_box[0][1]:.4f}, {refinement_box[1][1]:.4f}]")
-    solver = create_mpm99_solver("liquid", refinement_box=refinement_box)
-
-    # Pre-flight check: verify the finest patch can shift (platform criterion only)
-    if config.AMR_REFINEMENT_CRITERION == "platform":
-        planned_shift = solver.grid._level_dynamic_shifts(config.PLATFORM_STOP_TIME)[-1]
-        if all(abs(c) < 1e-12 for c in planned_shift):
-            raise RuntimeError("The finest AMR patch is pinned and cannot follow the moving platform")
+    solver = GradientHysteresisLiquidSolver2D(refinement_box=refinement_box)
 
     print(f"Grid levels: {solver.grid.num_levels}")
     print(f"Finest dx: {solver.grid.dx[-1]:.6e}")

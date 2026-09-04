@@ -142,6 +142,7 @@ class AdaptiveMPMSolver2D:
                 f_int = (stress_p @ sf_grad) * current_vol
                 f_ext = sf_weight * self.particles.mass[p] * ti.Vector(config.GRAVITY)
                 self.grid.f[level][I] += f_ext - f_int
+                #self.grid.f[level][I] += f_ext
 
     @ti.kernel
     def compute_forces(self):
@@ -260,6 +261,7 @@ class AdaptiveMPMSolver2D:
 
     def _adapt_particles(self, complete=False):
         if not self.particles.split_enabled:
+            self.particles._demote_unsupported_particles()
             return
         self.particles.merge_particles()
         passes = self.grid.max_level if complete else 1
@@ -339,7 +341,7 @@ class AdaptiveMPMSolver2D:
         for p in range(self.particles.active_count[None]):
             particle_level = self.particles.level[p]
             x_p = self.particles.x[p]
-            w_sum = 0.0
+            w_sum = ti.cast(0.0, ti.f64)
             grad_sum = ti.Vector.zero(ti.f64, 2)
             for level in ti.static(range(self.grid.num_levels)):
                 if level == particle_level:
@@ -372,8 +374,8 @@ class AdaptiveMPMSolver2D:
         n_violated = int((abs(w - 1.0) > 1e-10).sum())
         return (float(w.min()), float(w.max()), float(w.mean()), float(g.max()), n_violated)
 
-    def step(self, damping=1.0, current_time=0.0):
-        if self.grid.dynamic_refinement and self._step_count % self.dynamic_regrid_interval == 0:
+    def step(self, damping=1.0, current_time=0.0, adapt_particles=True):
+        if adapt_particles and self.grid.dynamic_refinement and self._step_count % self.dynamic_regrid_interval == 0:
             if self.grid.update_dynamic_refinement(current_time, self.particles):
                 self._update_gradient_levels()
                 self._adapt_particles(complete=True)
@@ -389,9 +391,10 @@ class AdaptiveMPMSolver2D:
         self.grid.fill_fine_boundary_velocities()
         self.g2p_APIC(current_time)
 
-        self._update_gradient_levels()
-        self._adapt_particles()
-        self._check_dynamic_split_capacity()
+        if adapt_particles:
+            self._update_gradient_levels()
+            self._adapt_particles()
+            self._check_dynamic_split_capacity()
         self._step_count += 1
         if self._step_count % 500 == 0 and not self._split_overflow_warned:
             if self.particles.split_overflow[None] > 0:

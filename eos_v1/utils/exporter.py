@@ -54,74 +54,107 @@ import config
 
 #     print(f"Exported frame {frame_number} to {filename}")
 
-def write_vtk(frame_number, pos, pressure, velocity, output_dir="output", material=None): # use polyvertex
+def write_vtk(frame_number, pos, pressure, velocity, output_dir="output", material=None,
+              point_scalars=None, point_vectors=None): # use polyvertex
     """
     Exports particle positions, pressure, and velocity to a VTK file.
-    Uses highly optimized POLYDATA / VERTICES for massive 3D point clouds.
+    Uses POLYDATA / VERTICES format with chunked lines to stay within
+    ParaView's ASCII reader buffer limit.
     """
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-        
-    filename = os.path.join(output_dir, f"mpm_fluid_{frame_number:04d}.vtk")
+
+    filename = os.path.join(output_dir, f"mpm_fluid_{frame_number:06d}.vtk")
     num_particles = len(pos)
-    
+
     # Sanitize NaN/inf to 0 so ParaView can load the file without errors.
-    pos = np.where(np.isfinite(pos), pos, 0.0)
-    pressure = np.where(np.isfinite(pressure), pressure, 0.0)
-    velocity = np.where(np.isfinite(velocity), velocity, 0.0)
+    pos = np.where(np.isfinite(pos), pos, 0.0).astype(np.float64)
+    pressure = np.where(np.isfinite(pressure), pressure, 0.0).astype(np.float64)
+    velocity = np.where(np.isfinite(velocity), velocity, 0.0).astype(np.float64)
     if material is not None:
         material = np.asarray(material, dtype=np.int32)
         if len(material) != num_particles:
             raise ValueError("material must have one value per particle")
-    
+
+    # Reserved names already written as base attributes — skip duplicates.
+    _reserved_scalars = {"Pressure", "Material"}
+    _reserved_vectors = {"Velocity"}
+    point_scalars = {} if point_scalars is None else {
+        str(name): np.asarray(values, dtype=np.float64)
+        for name, values in point_scalars.items() if str(name) not in _reserved_scalars
+    }
+    point_vectors = {} if point_vectors is None else {
+        str(name): np.asarray(values, dtype=np.float64)
+        for name, values in point_vectors.items() if str(name) not in _reserved_vectors
+    }
+    for name, values in point_scalars.items():
+        if values.shape != (num_particles,):
+            raise ValueError(f"point scalar {name} must have shape ({num_particles},)")
+        point_scalars[name] = np.where(np.isfinite(values), values, 0.0)
+    for name, values in point_vectors.items():
+        if values.ndim != 2 or values.shape[0] != num_particles or values.shape[1] not in (2, 3):
+            raise ValueError(f"point vector {name} must have shape ({num_particles}, 2) or ({num_particles}, 3)")
+        point_vectors[name] = np.where(np.isfinite(values), values, 0.0)
+
+    is_3d = config.DIM == 3
+
     with open(filename, 'w') as f:
         f.write("# vtk DataFile Version 3.0\n")
         f.write("MPM Simulation Data\n")
         f.write("ASCII\n")
-        # Change 1: Use POLYDATA instead of UNSTRUCTURED_GRID
         f.write("DATASET POLYDATA\n")
-        
-        # 1. POSITIONS (Stays the same)
+
+        # --- POINTS ---
         f.write(f"POINTS {num_particles} float\n")
-        if config.DIM == 3:
-            for i in range(num_particles):
-                f.write(f"{pos[i, 0]} {pos[i, 1]} {pos[i, 2]}\n")
+        if is_3d:
+            pts = pos
         else:
-            for i in range(num_particles):
-                f.write(f"{pos[i, 0]} {pos[i, 1]} 0.0\n")
-            
-        # Change 2: The Polyvertex / Vertices block
-        # Format: VERTICES <number_of_cells> <total_number_of_integers_to_read>
-        # We have 1 cell, containing `num_particles` vertices. 
-        # So it needs to read (1 for the count + num_particles for the IDs) integers.
+            pts = np.column_stack([pos[:, 0], pos[:, 1], np.zeros(num_particles)])
+        np.savetxt(f, pts, fmt="%.17g")
+
+        # --- VERTICES (chunked to avoid reader buffer overflow) ---
         f.write(f"\nVERTICES 1 {num_particles + 1}\n")
-        
-        # Write the number of particles, followed by all their IDs (0 to N-1)
-        f.write(f"{num_particles} ")
-        # Using a generator to write them space-separated efficiently
-        id_string = " ".join(str(i) for i in range(num_particles))
-        f.write(id_string + "\n")
-            
-        # 2. PRESSURE (SCALAR) (Stays the same)
+        f.write(f"{num_particles}\n")
+        ids = np.arange(num_particles)
+        chunk = 12  # 12 ints per line keeps lines well under 4096 chars
+        for start in range(0, num_particles, chunk):
+            row = ids[start:start + chunk]
+            f.write(" ".join(str(v) for v in row) + "\n")
+
+        # --- POINT_DATA ---
         f.write(f"\nPOINT_DATA {num_particles}\n")
+
+        # Pressure
         f.write("SCALARS Pressure float 1\n")
         f.write("LOOKUP_TABLE default\n")
-        for i in range(num_particles):
-            f.write(f"{pressure[i]}\n")
-        
-        # 3. VELOCITY (VECTOR) (Stays the same)
+        np.savetxt(f, pressure, fmt="%.17g")
+
+        # Velocity
         f.write("VECTORS Velocity float\n")
-        if config.DIM == 3:
-            for i in range(num_particles):
-                f.write(f"{velocity[i, 0]} {velocity[i, 1]} {velocity[i, 2]}\n")
+        if is_3d:
+            np.savetxt(f, velocity, fmt="%.17g %.17g %.17g")
         else:
-            for i in range(num_particles):
-                f.write(f"{velocity[i, 0]} {velocity[i, 1]} 0.0\n")
+            np.savetxt(f, velocity, fmt="%.17g %.17g 0.0")
+
+        # Material
         if material is not None:
             f.write("SCALARS Material int 1\n")
             f.write("LOOKUP_TABLE default\n")
-            for value in material:
-                f.write(f"{value}\n")
+            np.savetxt(f, material.reshape(-1, 1), fmt="%d")
+
+        # Extra point scalars
+        for name, values in point_scalars.items():
+            f.write(f"SCALARS {name} double 1\n")
+            f.write("LOOKUP_TABLE default\n")
+            np.savetxt(f, values, fmt="%.17g")
+
+        # Extra point vectors
+        for name, values in point_vectors.items():
+            f.write(f"VECTORS {name} double\n")
+            if values.shape[1] == 3:
+                np.savetxt(f, values, fmt="%.17g %.17g %.17g")
+            else:
+                np.savetxt(f, values, fmt="%.17g %.17g 0.0")
 
     print(f"Exported frame {frame_number} to {filename}")
 
@@ -151,6 +184,228 @@ def write_boundary_vtk(min_x, min_y, max_x, max_y, output_dir="output"):
         f.write("5 0 1 2 3 0\n")
         
     print(f"Exported static domain boundary to {filename}")
+
+def write_quadtree_grid_vtk(grid, output_dir="output"):
+    """Exports the quadtree refinement regions as one wireframe VTK file.
+
+    Each AMR level is drawn as a rectangle outlining its current refinement
+    region.  For dynamic refinement, call this after each grid update to
+    capture the moving patch.
+    """
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    filename = os.path.join(output_dir, "quadtree_grid.vtk")
+    regions = []
+    for level in range(grid.num_levels):
+        mn = grid.region_min_np[level]
+        mx = grid.region_max_np[level]
+        regions.append((level, float(mn[0]), float(mn[1]), float(mx[0]), float(mx[1])))
+    point_count = 4 * len(regions)
+    with open(filename, 'w') as f:
+        f.write("# vtk DataFile Version 3.0\n")
+        f.write("MPM Quadtree Refinement Regions\n")
+        f.write("ASCII\n")
+        f.write("DATASET POLYDATA\n")
+        f.write(f"POINTS {point_count} float\n")
+        for _, xmin, ymin, xmax, ymax in regions:
+            f.write(f"{xmin} {ymin} 0.0\n")
+            f.write(f"{xmax} {ymin} 0.0\n")
+            f.write(f"{xmax} {ymax} 0.0\n")
+            f.write(f"{xmin} {ymax} 0.0\n")
+        f.write(f"\nLINES {len(regions)} {5 * len(regions)}\n")
+        for i in range(len(regions)):
+            base = 4 * i
+            f.write(f"5 {base} {base + 1} {base + 2} {base + 3} {base}\n")
+        f.write(f"\nCELL_DATA {len(regions)}\n")
+        f.write("SCALARS Level int 1\n")
+        f.write("LOOKUP_TABLE default\n")
+        for level, *_ in regions:
+            f.write(f"{level}\n")
+    print(f"Exported quadtree grid to {filename}")
+
+def write_mpm_grid_vtk(grid, output_dir="output"):
+    """Exports the composite leaf-cell MPM background grid as wireframe."""
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    filename = os.path.join(output_dir, "mpm_background_grid.vtk")
+    cell_count = int(grid.leaf_count)
+    with open(filename, 'w') as f:
+        f.write("# vtk DataFile Version 3.0\n")
+        f.write("MPM Composite Background Grid\n")
+        f.write("ASCII\n")
+        f.write("DATASET POLYDATA\n")
+        f.write(f"POINTS {4 * cell_count} double\n")
+        for origin, size in zip(grid.leaf_origin, grid.leaf_size):
+            x0, y0 = float(origin[0]), float(origin[1])
+            x1, y1 = x0 + float(size), y0 + float(size)
+            f.write(f"{x0:.17g} {y0:.17g} 0.0\n")
+            f.write(f"{x1:.17g} {y0:.17g} 0.0\n")
+            f.write(f"{x1:.17g} {y1:.17g} 0.0\n")
+            f.write(f"{x0:.17g} {y1:.17g} 0.0\n")
+        f.write(f"\nLINES {cell_count} {6 * cell_count}\n")
+        for i in range(cell_count):
+            base = 4 * i
+            f.write(f"5 {base} {base + 1} {base + 2} {base + 3} {base}\n")
+        f.write(f"\nCELL_DATA {cell_count}\n")
+        f.write("SCALARS RefinementLevel int 1\n")
+        f.write("LOOKUP_TABLE default\n")
+        for level in grid.leaf_level:
+            f.write(f"{int(level)}\n")
+        f.write("SCALARS CellSize double 1\n")
+        f.write("LOOKUP_TABLE default\n")
+        for size in grid.leaf_size:
+            f.write(f"{float(size):.17g}\n")
+    print(f"Exported MPM background grid to {filename}")
+
+def _current_leaf_cells(grid):
+    levels = []
+    origins = []
+    sizes = []
+    for level in range(grid.num_levels):
+        dx = float(grid.dx[level])
+        region_min = grid.region_min_np[level]
+        region_max = grid.region_max_np[level]
+        nx = int(round((region_max[0] - region_min[0]) / dx))
+        ny = int(round((region_max[1] - region_min[1]) / dx))
+        ii, jj = np.meshgrid(np.arange(nx), np.arange(ny), indexing='ij')
+        ox = region_min[0] + ii * dx
+        oy = region_min[1] + jj * dx
+        keep = np.ones((nx, ny), dtype=bool)
+        if level < grid.max_level:
+            cx = ox + 0.5 * dx
+            cy = oy + 0.5 * dx
+            next_min = grid.region_min_np[level + 1]
+            next_max = grid.region_max_np[level + 1]
+            keep = ~((cx >= next_min[0]) & (cx < next_max[0]) & (cy >= next_min[1]) & (cy < next_max[1]))
+        levels.append(np.full(int(keep.sum()), level, dtype=np.int32))
+        origins.append(np.stack([ox[keep], oy[keep]], axis=1))
+        sizes.append(np.full(int(keep.sum()), dx, dtype=np.float64))
+    levels = np.concatenate(levels)
+    origins = np.concatenate(origins)
+    sizes = np.concatenate(sizes)
+    area = float(np.sum(sizes**2))
+    domain_area = float(grid.domain_width * grid.domain_height)
+    if not np.isclose(area, domain_area, rtol=1e-12, atol=1e-14):
+        raise RuntimeError(f"dynamic leaf cells do not tile the domain: {area} vs {domain_area}")
+    return levels, origins, sizes
+
+def write_dynamic_mpm_grid_vtk(grid, frame, output_dir="output"):
+    """Exports the current dynamic composite leaf grid as a VTK frame."""
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    levels, origins, sizes = _current_leaf_cells(grid)
+    cell_count = len(levels)
+    filename = os.path.join(output_dir, f"mpm_background_grid_{frame:06d}.vtk")
+    with open(filename, 'w') as f:
+        f.write("# vtk DataFile Version 3.0\n")
+        f.write("MPM Dynamic Composite Background Grid\n")
+        f.write("ASCII\n")
+        f.write("DATASET POLYDATA\n")
+        f.write(f"POINTS {4 * cell_count} double\n")
+        for origin, size in zip(origins, sizes):
+            x0, y0 = float(origin[0]), float(origin[1])
+            x1, y1 = x0 + float(size), y0 + float(size)
+            f.write(f"{x0:.17g} {y0:.17g} 0.0\n")
+            f.write(f"{x1:.17g} {y0:.17g} 0.0\n")
+            f.write(f"{x1:.17g} {y1:.17g} 0.0\n")
+            f.write(f"{x0:.17g} {y1:.17g} 0.0\n")
+        f.write(f"\nLINES {cell_count} {6 * cell_count}\n")
+        for i in range(cell_count):
+            base = 4 * i
+            f.write(f"5 {base} {base + 1} {base + 2} {base + 3} {base}\n")
+        f.write(f"\nCELL_DATA {cell_count}\n")
+        f.write("SCALARS RefinementLevel int 1\n")
+        f.write("LOOKUP_TABLE default\n")
+        for level in levels:
+            f.write(f"{int(level)}\n")
+        f.write("SCALARS CellSize double 1\n")
+        f.write("LOOKUP_TABLE default\n")
+        for size in sizes:
+            f.write(f"{float(size):.17g}\n")
+    print(f"Exported dynamic MPM grid frame {frame} to {filename}")
+
+def write_dynamic_quadtree_grid_vtk(grid, frame, output_dir="output"):
+    """Exports the current dynamic refinement-region outlines as a VTK frame."""
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    filename = os.path.join(output_dir, f"quadtree_grid_{frame:06d}.vtk")
+    regions = [(level, grid.region_min_np[level], grid.region_max_np[level]) for level in range(grid.num_levels)]
+    with open(filename, 'w') as f:
+        f.write("# vtk DataFile Version 3.0\n")
+        f.write("MPM Dynamic Refinement Regions\n")
+        f.write("ASCII\n")
+        f.write("DATASET POLYDATA\n")
+        f.write(f"POINTS {4 * len(regions)} double\n")
+        for _, minimum, maximum in regions:
+            f.write(f"{minimum[0]:.17g} {minimum[1]:.17g} 0.0\n")
+            f.write(f"{maximum[0]:.17g} {minimum[1]:.17g} 0.0\n")
+            f.write(f"{maximum[0]:.17g} {maximum[1]:.17g} 0.0\n")
+            f.write(f"{minimum[0]:.17g} {maximum[1]:.17g} 0.0\n")
+        f.write(f"\nLINES {len(regions)} {6 * len(regions)}\n")
+        for i in range(len(regions)):
+            base = 4 * i
+            f.write(f"5 {base} {base + 1} {base + 2} {base + 3} {base}\n")
+        f.write(f"\nCELL_DATA {len(regions)}\n")
+        f.write("SCALARS Level int 1\n")
+        f.write("LOOKUP_TABLE default\n")
+        for level, _, _ in regions:
+            f.write(f"{level}\n")
+    print(f"Exported dynamic quadtree frame {frame} to {filename}")
+
+def write_mpm_grid_level_vtk(grid, level, output_dir="output"):
+    """Exports a single MPM grid level as a wireframe VTK file.
+
+    This is useful in gradient mode where every level covers the entire
+    domain: the composite leaf grid only shows the finest level, so the
+    coarser levels are invisible. Per-level files let you overlay the
+    grid that matches each particle's ParticleLevel in ParaView.
+    """
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    if level < 0 or level >= grid.num_levels:
+        raise ValueError(f"level {level} out of range [0, {grid.num_levels})")
+    dx = float(grid.dx[level])
+    region_min = grid.region_min_np[level]
+    region_max = grid.region_max_np[level]
+    nx = int(round((region_max[0] - region_min[0]) / dx))
+    ny = int(round((region_max[1] - region_min[1]) / dx))
+    cell_count = nx * ny
+    filename = os.path.join(output_dir, f"mpm_grid_level_{level}.vtk")
+    with open(filename, 'w') as f:
+        f.write("# vtk DataFile Version 3.0\n")
+        f.write(f"MPM Background Grid Level {level}\n")
+        f.write("ASCII\n")
+        f.write("DATASET POLYDATA\n")
+        f.write(f"POINTS {4 * cell_count} double\n")
+        for j in range(ny):
+            for i in range(nx):
+                x0 = region_min[0] + i * dx
+                y0 = region_min[1] + j * dx
+                x1 = x0 + dx
+                y1 = y0 + dx
+                f.write(f"{x0:.17g} {y0:.17g} 0.0\n")
+                f.write(f"{x1:.17g} {y0:.17g} 0.0\n")
+                f.write(f"{x1:.17g} {y1:.17g} 0.0\n")
+                f.write(f"{x0:.17g} {y1:.17g} 0.0\n")
+        f.write(f"\nLINES {cell_count} {6 * cell_count}\n")
+        for k in range(cell_count):
+            base = 4 * k
+            f.write(f"5 {base} {base + 1} {base + 2} {base + 3} {base}\n")
+        f.write(f"\nCELL_DATA {cell_count}\n")
+        f.write("SCALARS RefinementLevel int 1\n")
+        f.write("LOOKUP_TABLE default\n")
+        for _ in range(cell_count):
+            f.write(f"{level}\n")
+        f.write("SCALARS CellSize double 1\n")
+        f.write("LOOKUP_TABLE default\n")
+        for _ in range(cell_count):
+            f.write(f"{dx:.17g}\n")
+    print(f"Exported MPM grid level {level} to {filename}")
+
+def write_mpm_grid_levels_vtk(grid, output_dir="output"):
+    """Exports every MPM grid level as a separate wireframe VTK file."""
+    for level in range(grid.num_levels):
+        write_mpm_grid_level_vtk(grid, level, output_dir=output_dir)
 
 def write_boundary_vtk_3d(min_x, min_y, min_z, max_x, max_y, max_z, output_dir="output"):
     """Exports a 3D wireframe box representing the domain bucket."""

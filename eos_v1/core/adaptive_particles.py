@@ -167,6 +167,15 @@ class AdaptiveParticleSystem2D:
             target = ti.min(self.gradient_level[p], geometric_target)
         return target
 
+    @ti.func
+    def _children_fit_level(self, p, level):
+        off = 0.25 * ti.sqrt(self.volume0[p])
+        minimum = self.grid.region_min[level]
+        maximum = self.grid.region_max[level]
+        x = self.x[p]
+        return (x[0] - off >= minimum[0] and x[0] + off < maximum[0]
+                and x[1] - off >= minimum[1] and x[1] + off < maximum[1])
+
     @ti.kernel
     def split_particles(self):
         # Promote particles to a finer level.  When AMR_GRADIENT_REFINE is True,
@@ -179,40 +188,43 @@ class AdaptiveParticleSystem2D:
             if target > lvl:
                 new_level = lvl + 1
                 if self.mass[p] > 1.5 * self.native_mass[new_level]:
-                    base = ti.atomic_add(self.active_count[None], 3)
-                    if base + 3 <= self.capacity:
-                        x0 = self.x[p]
-                        v0 = self.v[p]
-                        C0 = self.C[p]
-                        F0 = self.F[p]
-                        S0 = self.stress[p]
-                        pr0 = self.pressure[p]
-                        material0 = self.material[p]
-                        Jp0 = self.Jp[p]
-                        m_child = 0.25 * self.mass[p]
-                        vol_child = 0.25 * self.volume0[p]
-                        off = 0.25 * ti.sqrt(self.volume0[p])
-                        for k in ti.static(range(4)):
-                            sx = -1.0 if k % 2 == 0 else 1.0
-                            sy = -1.0 if k // 2 == 0 else 1.0
-                            d = ti.Vector([sx * off, sy * off])
-                            idx = base + k - 1
-                            if ti.static(k == 0):
-                                idx = p
-                            self.x[idx] = x0 + d
-                            self.v[idx] = v0 + C0 @ d
-                            self.C[idx] = C0
-                            self.F[idx] = F0
-                            self.stress[idx] = S0
-                            self.pressure[idx] = pr0
-                            self.material[idx] = material0
-                            self.Jp[idx] = Jp0
-                            self.level[idx] = new_level
-                            self.mass[idx] = m_child
-                            self.volume0[idx] = vol_child
-                    else:
-                        ti.atomic_sub(self.active_count[None], 3)
-                        ti.atomic_add(self.split_overflow[None], 1)
+                    if self._children_fit_level(p, new_level):
+                        base = ti.atomic_add(self.active_count[None], 3)
+                        if base + 3 <= self.capacity:
+                            x0 = self.x[p]
+                            v0 = self.v[p]
+                            C0 = self.C[p]
+                            F0 = self.F[p]
+                            S0 = self.stress[p]
+                            pr0 = self.pressure[p]
+                            material0 = self.material[p]
+                            Jp0 = self.Jp[p]
+                            gradient_level0 = self.gradient_level[p]
+                            m_child = 0.25 * self.mass[p]
+                            vol_child = 0.25 * self.volume0[p]
+                            off = 0.25 * ti.sqrt(self.volume0[p])
+                            for k in ti.static(range(4)):
+                                sx = -1.0 if k % 2 == 0 else 1.0
+                                sy = -1.0 if k // 2 == 0 else 1.0
+                                d = ti.Vector([sx * off, sy * off])
+                                idx = base + k - 1
+                                if ti.static(k == 0):
+                                    idx = p
+                                self.x[idx] = x0 + d
+                                self.v[idx] = v0 + C0 @ d
+                                self.C[idx] = C0
+                                self.F[idx] = F0
+                                self.stress[idx] = S0
+                                self.pressure[idx] = pr0
+                                self.material[idx] = material0
+                                self.Jp[idx] = Jp0
+                                self.gradient_level[idx] = gradient_level0
+                                self.level[idx] = new_level
+                                self.mass[idx] = m_child
+                                self.volume0[idx] = vol_child
+                        else:
+                            ti.atomic_sub(self.active_count[None], 3)
+                            ti.atomic_add(self.split_overflow[None], 1)
                 else:
                     self.level[p] = new_level
 
@@ -246,9 +258,28 @@ class AdaptiveParticleSystem2D:
 
     @ti.kernel
     def _accumulate_merge_bins(self, target_level: ti.template()):
+        merge_speed_limit = ti.static(getattr(config, 'AMR_MERGE_SPEED_LIMIT', 0.5))
         for p in range(self.active_count[None]):
             target = self._target_level(p)
             if target == target_level and self.level[p] >= target_level:
+                # Jelly (material 1) is purely elastic — it holds its shape
+                # via the deformation gradient F, which can't be averaged
+                # across children without destroying structural integrity.
+                # Liquid (0) and snow (2) can be merged: liquid has no shear
+                # memory, and snow is elastoplastic so after settling the
+                # elastic part of F has relaxed and the plastic state is
+                # captured by the scalar Jp (safe to average).
+                if self.material[p] == 1:
+                    continue
+                # Only merge particles that are nearly stationary — merging
+                # particles with diverged F states produces unphysical stress.
+                # Exception: particles whose stencil is no longer supported
+                # at their level MUST merge (the alternative is a direct
+                # demotion that breaks the mass-native invariant), so the
+                # speed limit does not apply to them.
+                speed = self.v[p].norm()
+                if speed > merge_speed_limit and self._stencil_supported(p, self.level[p]):
+                    continue
                 slot = self._merge_slot(target_level, self.x[p], self.material[p])
                 m = self.mass[p]
                 vol = self.volume0[p]
@@ -270,23 +301,57 @@ class AdaptiveParticleSystem2D:
 
     @ti.kernel
     def _finalize_merge_bins(self, target_level: ti.template()):
+        merge_speed_limit = ti.static(getattr(config, 'AMR_MERGE_SPEED_LIMIT', 1e9))
         for p in range(self.active_count[None]):
             target = self._target_level(p)
             if target == target_level and self.level[p] >= target_level:
+                # Jelly never merges — see _accumulate_merge_bins comment.
+                if self.material[p] == 1:
+                    continue
+                # Particles that were skipped in accumulation (too fast)
+                # must not be deleted — they keep their state.
+                speed = self.v[p].norm()
+                if speed > merge_speed_limit and self._stencil_supported(p, self.level[p]):
+                    continue
                 slot = self._merge_slot(target_level, self.x[p], self.material[p])
-                if self.merge_coarsen_count[slot] > 0:
+                count = self.merge_count[slot]
+                m = self.merge_mass[slot]
+                native_mass = self.native_mass[target_level]
+                can_merge = count >= ti.static(self.merge_min_particles)
+                if self.merge_coarsen_count[slot] != count:
+                    can_merge = False
+                if ti.abs(m - native_mass) > 1e-6 * native_mass:
+                    can_merge = False
+                if can_merge:
                     if p == self.merge_keep[slot]:
-                        m = self.merge_mass[slot]
                         vol = self.merge_volume[slot]
                         inv_m = 1.0 / m
                         inv_vol = 1.0 / vol
                         self.x[p] = self.merge_x[slot] * inv_m
                         self.v[p] = self.merge_v[slot] * inv_m
                         self.C[p] = self.merge_C[slot] * inv_m
-                        self.F[p] = self.merge_F[slot] * inv_vol
-                        self.stress[p] = self.merge_stress[slot] * inv_vol
+                        mat = self.material[p]
+                        if mat == 0:
+                            # Liquid: no shear memory — reset F to volumetric part.
+                            J = ti.cast(1.0, ti.f64)
+                            for d in ti.static(range(2)):
+                                J *= self.merge_F[slot][d, d] * inv_vol
+                            sqJ = ti.sqrt(ti.max(J, 1e-12))
+                            self.F[p] = ti.Matrix.identity(ti.f64, 2) * sqJ
+                            self.stress[p] = ti.Matrix.zero(ti.f64, 2, 2)
+                            self.Jp[p] = 1.0
+                        else:
+                            # Snow: elastoplastic.  After settling the elastic
+                            # part of F has relaxed; the plastic state is in Jp
+                            # (a scalar, safe to volume-average).  Reset F to
+                            # identity — the constitutive model will recompute
+                            # stress from F next step, and hardening from Jp
+                            # preserves the accumulated plastic damage.
+                            self.F[p] = ti.Matrix.identity(ti.f64, 2)
+                            self.stress[p] = ti.Matrix.zero(ti.f64, 2, 2)
+                            self.Jp[p] = self.merge_Jp[slot] * inv_vol
                         self.pressure[p] = self.merge_pressure[slot] * inv_vol
-                        self.Jp[p] = self.merge_Jp[slot] * inv_vol
+                        self.gradient_level[p] = target_level
                         self.level[p] = target_level
                         self.mass[p] = m
                         self.volume0[p] = vol
@@ -294,6 +359,30 @@ class AdaptiveParticleSystem2D:
                         self.level[p] = -1
                         self.mass[p] = 0.0
                         self.volume0[p] = 0.0
+
+    @ti.func
+    def _stencil_supported(self, p, level: ti.template()):
+        """True if the particle's 3x3 B-spline stencil fits inside its level's
+        grid.  Unsupported particles cannot stay at their level: they must
+        either merge into a coarser level or be demoted."""
+        supported = True
+        for grid_level in ti.static(range(self.grid.num_levels)):
+            if level == grid_level:
+                fx = (self.x[p] - self.grid.origin[grid_level]) * self.grid.level_inv_dx[grid_level]
+                base = ti.cast(fx - 0.5, ti.i32)
+                if (base[0] < 0 or base[0] + 2 >= ti.static(self.grid.res_x[grid_level])
+                        or base[1] < 0 or base[1] + 2 >= ti.static(self.grid.res_y[grid_level])):
+                    supported = False
+        return supported
+
+    @ti.kernel
+    def _demote_unsupported_particles(self):
+        for p in range(self.active_count[None]):
+            level = self.level[p]
+            target = self._target_level(p)
+            if target < level:
+                if not self._stencil_supported(p, level):
+                    self.level[p] = target
 
     @ti.kernel
     def _reset_compaction(self):
@@ -336,12 +425,16 @@ class AdaptiveParticleSystem2D:
         self.active_count[None] = n
 
     def merge_particles(self):
-        if not self.merge_enabled or self.grid.num_levels <= 1:
+        if self.grid.num_levels <= 1:
+            return
+        if not self.merge_enabled:
+            self._demote_unsupported_particles()
             return
         for target_level in range(self.grid.max_level):
             self._clear_merge_bins()
             self._accumulate_merge_bins(target_level)
             self._finalize_merge_bins(target_level)
+        self._demote_unsupported_particles()
         self._reset_compaction()
         self._scatter_compaction()
         self._apply_compaction()

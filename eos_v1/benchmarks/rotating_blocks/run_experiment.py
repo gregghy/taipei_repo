@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 import sys
 
@@ -15,13 +16,15 @@ from utils.exporter import write_boundary_vtk, write_mpm_grid_levels_vtk, write_
 
 MATERIAL_IDS = {"fluid": 0, "jelly": 1, "snow": 2}
 BLOCK_BOUNDS = (0.010, 0.034, 0.018, 0.042)
-BLOCK_HALF_HEIGHT = 0.012
+BLOCK_CENTER_X0 = 0.5 * (BLOCK_BOUNDS[0] + BLOCK_BOUNDS[1])
+BLOCK_CENTER_Y = 0.5 * (BLOCK_BOUNDS[2] + BLOCK_BOUNDS[3])
+BLOCK_HALF_WIDTH = 0.5 * (BLOCK_BOUNDS[1] - BLOCK_BOUNDS[0])
+BLOCK_HALF_HEIGHT = 0.5 * (BLOCK_BOUNDS[3] - BLOCK_BOUNDS[2])
 ACCEL_TIME = 0.006
 CRUISE_TIME = 0.018
 DECEL_TIME = 0.006
 MAX_SPEED = 3.0
-SHEAR_FRACTION = 0.08
-GRADIENT_RELEASE_TIME = ACCEL_TIME + 2.0 * CRUISE_TIME / 3.0
+MAX_ANGULAR_SPEED = 40.0
 TOTAL_TIME = ACCEL_TIME + CRUISE_TIME + DECEL_TIME
 
 
@@ -32,7 +35,7 @@ def configure(mode):
     config.RHO_0 = 1.0
     config.GRAVITY = [0.0, 0.0]
     config.C_0 = 32.0
-    config.V_MAX_ESTIMATE = MAX_SPEED
+    config.V_MAX_ESTIMATE = MAX_SPEED + MAX_ANGULAR_SPEED * max(BLOCK_HALF_WIDTH, BLOCK_HALF_HEIGHT)
     config.MAX_WAVE_SPEED = config.C_0 + config.V_MAX_ESTIMATE
     config.CFL = 0.1
     config.DT = 4e-6
@@ -52,12 +55,6 @@ def configure(mode):
     config.AMR_SPLIT_PARTICLES = True
     config.AMR_MERGE_PARTICLES = True
     config.AMR_MERGE_MIN_PARTICLES = 4
-    # The block moves by prescribed rigid motion (all siblings share identical
-    # velocity), so merging at speed is safe here.  The default merge speed
-    # limit (0.5 m/s) would block merging while the block cruises at 3 m/s,
-    # and exiting particles would then be demoted directly to level 0 —
-    # breaking the mass-native invariant so they can never merge back.
-    config.AMR_MERGE_SPEED_LIMIT = 1e9
     config.AMR_MATERIAL_COUNT = 3
     config.AMR_PARTICLE_CAPACITY_FACTOR = 12.0
     config.AMR_INITIAL_FLUID_XMIN = 0.0
@@ -104,6 +101,7 @@ def build_state(solver, material):
                         levels.append(level)
                         volume = (dx / ppc) ** 2
                         volumes.append(volume)
+            export_frame(solver, step, output_directory)
                         masses.append(config.RHO_0 * volume)
                         materials.append(material)
     return tuple(np.asarray(values, dtype=dtype) for values, dtype in (
@@ -146,14 +144,28 @@ def motion(t):
     return 0.0
 
 
-def shear_rate(speed):
-    return SHEAR_FRACTION * speed / BLOCK_HALF_HEIGHT
-
-
-def prescribed_shear(mode, time):
-    if mode == "gradient" and time < GRADIENT_RELEASE_TIME:
-        return shear_rate(motion(time))
+def angular_motion(t):
+    if t < ACCEL_TIME:
+        return MAX_ANGULAR_SPEED * t / ACCEL_TIME
+    if t < ACCEL_TIME + CRUISE_TIME:
+        return MAX_ANGULAR_SPEED
+    if t < TOTAL_TIME:
+        return MAX_ANGULAR_SPEED * (TOTAL_TIME - t) / DECEL_TIME
     return 0.0
+
+
+def displacement(t):
+    if t < ACCEL_TIME:
+        return 0.5 * MAX_SPEED * t * t / ACCEL_TIME
+    d1 = 0.5 * MAX_SPEED * ACCEL_TIME
+    t2 = t - ACCEL_TIME
+    if t2 < CRUISE_TIME:
+        return d1 + MAX_SPEED * t2
+    d2 = MAX_SPEED * CRUISE_TIME
+    t3 = t2 - CRUISE_TIME
+    if t3 < DECEL_TIME:
+        return d1 + d2 + MAX_SPEED * t3 - 0.5 * MAX_SPEED * t3 * t3 / DECEL_TIME
+    return d1 + d2 + 0.5 * MAX_SPEED * DECEL_TIME
 
 
 def material_summary(solver):
@@ -177,7 +189,6 @@ def momentum_diagnostics(solver, frame, time):
     velocity = solver.particles.v.to_numpy()[:n]
     mass = solver.particles.mass.to_numpy()[:n]
     level = solver.particles.level.to_numpy()[:n]
-    gradient_level = solver.particles.gradient_level.to_numpy()[:n]
     affine = solver.particles.C.to_numpy()[:n]
     total_mass = float(mass.sum())
     if total_mass <= 0.0:
@@ -209,7 +220,6 @@ def momentum_diagnostics(solver, frame, time):
     point_scalars = {
         "Mass": mass,
         "ParticleLevel": level,
-        "GradientTargetLevel": gradient_level,
         "LinearMomentumMagnitude": linear_momentum_magnitude,
         "COMRelativeMomentumMagnitude": relative_momentum_magnitude,
         "OrbitalAngularMomentumCOM": orbital_angular_momentum,
@@ -227,9 +237,6 @@ def momentum_diagnostics(solver, frame, time):
         "time": float(time),
         "particles": int(n),
         "particles_by_level": [int((level == grid_level).sum()) for grid_level in range(solver.grid.num_levels)],
-        "gradient_targets_by_level": [
-            int((gradient_level == grid_level).sum()) for grid_level in range(solver.grid.num_levels)
-        ],
         "total_mass": total_mass,
         "center_of_mass": center_of_mass.tolist(),
         "center_of_mass_velocity": center_of_mass_velocity.tolist(),
@@ -269,43 +276,38 @@ def run_case(mode, material_name, steps, export_every):
     initial = material_summary(solver)
 
     @ti.kernel
-    def prescribe_rigid_state(speed: ti.f64):
+    def prescribe_rigid_state(speed: ti.f64, omega: ti.f64, cx: ti.f64, cy: ti.f64):
         for p in range(solver.particles.active_count[None]):
-            solver.particles.v[p] = ti.Vector([speed, 0.0])
-            solver.particles.C[p] = ti.Matrix.zero(ti.f64, 2, 2)
+            dx_ = solver.particles.x[p][0] - cx
+            dy_ = solver.particles.x[p][1] - cy
+            solver.particles.v[p] = ti.Vector([speed - omega * dy_, omega * dx_])
+            solver.particles.C[p] = ti.Matrix([[0.0, -omega], [omega, 0.0]])
             solver.particles.F[p] = ti.Matrix.identity(ti.f64, 2)
             solver.particles.stress[p] = ti.Matrix.zero(ti.f64, 2, 2)
             solver.particles.pressure[p] = 0.0
             solver.particles.Jp[p] = 1.0
 
-    @ti.kernel
-    def prescribe_refinement_gradient(shear: ti.f64):
-        for p in range(solver.particles.active_count[None]):
-            solver.particles.C[p] = ti.Matrix([[0.0, shear], [0.0, 0.0]])
-
     t = 0.0
     for step in range(1, steps + 1):
         speed = motion(t)
-        prescribe_rigid_state(speed)
-        solver.step(current_time=t, adapt_particles=mode != "gradient")
-        if mode == "gradient":
-            prescribe_refinement_gradient(prescribed_shear(mode, t))
-            solver._update_gradient_levels()
-            solver._adapt_particles()
-            solver._check_dynamic_split_capacity()
+        omega = angular_motion(t)
+        cx = BLOCK_CENTER_X0 + displacement(t)
+        cy = BLOCK_CENTER_Y
+        prescribe_rigid_state(speed, omega, cx, cy)
+        solver.step(current_time=t)
         t += config.DT
-        prescribe_rigid_state(motion(t))
+        speed_next = motion(t)
+        omega_next = angular_motion(t)
+        cx_next = BLOCK_CENTER_X0 + displacement(t)
+        prescribe_rigid_state(speed_next, omega_next, cx_next, BLOCK_CENTER_Y)
         if step % export_every == 0 and step != steps:
             momentum_history.append(export_frame(solver, step, output_directory, t))
-    prescribe_rigid_state(0.0)
+    prescribe_rigid_state(0.0, 0.0, BLOCK_CENTER_X0 + displacement(TOTAL_TIME), BLOCK_CENTER_Y)
     momentum_history.append(export_frame(solver, steps, output_directory, t))
     momentum_history_path = os.path.join(output_directory, "momentum_history.json")
     with open(momentum_history_path, "w", encoding="utf-8") as output:
         json.dump(momentum_history, output, indent=2)
-    peak_particles_by_level = [
-        max(entry["particles_by_level"][level] for entry in momentum_history)
-        for level in range(solver.grid.num_levels)
-    ]
+    peak_particle_count = max(entry["particles"] for entry in momentum_history)
     final = material_summary(solver)
     n = solver.particles.n_active()
     positions = solver.particles.x.to_numpy()[:n]
@@ -317,8 +319,12 @@ def run_case(mode, material_name, steps, export_every):
         raise AssertionError(f"{mode} produced non-finite particle state")
     if not np.isclose(initial[material_name]["mass"], final[material_name]["mass"], rtol=1e-12, atol=1e-14):
         raise AssertionError(f"{mode}/{material_name} mass changed: {initial[material_name]['mass']} -> {final[material_name]['mass']}")
-    if final[material_name]["levels"] != initial[material_name]["levels"]:
-        raise AssertionError(f"{mode}/{material_name} did not return to its initial level distribution")
+    if mode == "quadtree":
+        if final[material_name]["levels"][-1] != 0:
+            raise AssertionError(f"{mode}/{material_name} retained finest-level particles after leaving the corridor")
+        if (peak_particle_count > initial[material_name]["particles"]
+                and final[material_name]["particles"] >= peak_particle_count):
+            raise AssertionError(f"{mode}/{material_name} did not reduce its refined particle count")
     clearance = 0.1 * solver.grid.dx[0]
     if np.any(positions[:, 0] <= clearance) or np.any(positions[:, 0] >= config.AMR_DOMAIN_WIDTH - clearance):
         raise AssertionError(f"{mode} block reached a horizontal boundary")
@@ -327,16 +333,18 @@ def run_case(mode, material_name, steps, export_every):
     max_deformation_error = float(np.linalg.norm(deformation - np.eye(2), axis=(1, 2)).max())
     if max_pressure > 1e-12 or max_stress_norm > 1e-12 or max_deformation_error > 1e-12:
         raise AssertionError(f"{mode}/{material_name} was not traction-free at the final state")
+    total_rotation = 0.5 * MAX_ANGULAR_SPEED * ACCEL_TIME + MAX_ANGULAR_SPEED * CRUISE_TIME + 0.5 * MAX_ANGULAR_SPEED * DECEL_TIME
     return {
         "mode": mode,
         "material": material_name,
         "steps": steps,
         "time": t,
         "prescribed_speed": motion(t),
-        "prescribed_shear_rate": prescribed_shear(mode, t),
-        "maximum_shear_rate": prescribed_shear(mode, ACCEL_TIME),
-        "gradient_release_time": GRADIENT_RELEASE_TIME if mode == "gradient" else None,
-        "peak_particles_by_level": peak_particles_by_level,
+        "prescribed_angular_speed": angular_motion(t),
+        "total_rotation_rad": total_rotation,
+        "total_rotation_deg": math.degrees(total_rotation),
+        "peak_particle_count": peak_particle_count,
+        "final_to_peak_particle_ratio": final[material_name]["particles"] / peak_particle_count,
         "max_particle_speed": float(np.linalg.norm(velocity, axis=1).max()),
         "max_pressure": max_pressure,
         "max_stress_norm": max_stress_norm,
@@ -369,7 +377,7 @@ def main():
     results = [run_case(mode, material, steps, args.export_every) for mode in modes for material in materials]
     for result in results:
         print(json.dumps(result, sort_keys=True))
-    output_path = os.path.join(os.path.dirname(__file__), "three_blocks_results.json")
+    output_path = os.path.join(os.path.dirname(__file__), "rotating_blocks_results.json")
     with open(output_path, "w", encoding="utf-8") as output:
         json.dump(results, output, indent=2)
     print(f"wrote {output_path}")

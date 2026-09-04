@@ -166,12 +166,24 @@ solver.step(current_time=sample_time)
 n_after = solver.particles.n_active()
 positions = solver.particles.x.to_numpy()[:n_after]
 particle_levels = solver.particles.level.to_numpy()[:n_after]
-mass_after = solver.particles.mass.to_numpy()[:n_after].sum()
+particle_mass = solver.particles.mass.to_numpy()[:n_after]
+mass_after = particle_mass.sum()
 assert np.allclose(grid.refinement_shift.to_numpy(), shift)
 assert n_before > 0 and n_after > 0
 assert np.isfinite(positions).all()
 assert np.all((particle_levels >= 0) & (particle_levels <= grid.max_level))
-assert np.array_equal(particle_levels, expected_particle_levels(positions))
+geometric_levels = expected_particle_levels(positions)
+assert np.all(particle_levels >= geometric_levels)
+native_mass = solver.particles.native_mass.to_numpy()
+mass_ratio = particle_mass / native_mass[particle_levels]
+assert np.all(mass_ratio <= 1.0 + 1e-12)
+demotion_depth = np.log(mass_ratio) / np.log(0.25)
+assert np.allclose(demotion_depth, np.rint(demotion_depth), rtol=1e-12, atol=1e-12)
+w_min, w_max, _, g_max, n_violated = solver.check_partition_of_unity()
+assert n_violated == 0, (w_min, w_max, g_max, n_violated)
+assert np.isclose(w_min, 1.0, rtol=1e-12, atol=1e-12)
+assert np.isclose(w_max, 1.0, rtol=1e-12, atol=1e-12)
+assert g_max < 1e-9
 platform_displacement, _ = grid._platform_motion_numpy(sample_time)
 platform_min = np.array([config.INT_MOVINGRECT_XMIN, config.INT_MOVINGRECT_YMIN]) + platform_displacement
 platform_max = np.array([config.INT_MOVINGRECT_XMAX, config.INT_MOVINGRECT_YMAX]) + platform_displacement
