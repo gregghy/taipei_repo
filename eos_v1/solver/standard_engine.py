@@ -861,7 +861,7 @@ class StandardSolver:
             is_inf = ti.math.isinf(x[0]) or ti.math.isinf(x[1]) or ti.math.isinf(v[0]) or ti.math.isinf(v[1])
             
             if not is_nan and not is_inf:
-                healthy_count += 1                   
+                ti.atomic_add(healthy_count, 1)
                     
         return healthy_count
     

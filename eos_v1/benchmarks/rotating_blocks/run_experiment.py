@@ -101,7 +101,6 @@ def build_state(solver, material):
                         levels.append(level)
                         volume = (dx / ppc) ** 2
                         volumes.append(volume)
-            export_frame(solver, step, output_directory)
                         masses.append(config.RHO_0 * volume)
                         materials.append(material)
     return tuple(np.asarray(values, dtype=dtype) for values, dtype in (

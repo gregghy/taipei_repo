@@ -202,6 +202,28 @@ elif ACTIVE_SCENARIO == "ADAPTIVE_MPM":
     MP_HEIGHT = AMR_DOMAIN_HEIGHT
 
 # =======================================================================
+# 3.5 SCENARIO CONFIG VALIDATION
+# =======================================================================
+_REQUIRED_BY_SCENARIO = {
+    "POISEUILLE": ["POS_MP_LEFT_BOTTOM", "MP_WIDTH", "GRAVITY"],
+    "INFLOW": ["POS_MP_LEFT_BOTTOM", "MP_WIDTH", "GRAVITY", "INFLOW_DURATION",
+               "INFLOW_VELOCITY", "MAX_PARTICLE_INFLOW"],
+}
+if ACTIVE_SCENARIO == "DAM_BREAK" and IS_DAMBREAK_WITH_OBSTACLE:
+    _REQUIRED_BY_SCENARIO[ACTIVE_SCENARIO] = [
+        "INT_SQUARE_XMIN", "INT_SQUARE_XMAX", "INT_SQUARE_YMIN",
+        "INT_SQUARE_YMAX", "INT_SQUARE_YMIN_DRAW",
+    ]
+
+_MISSING = [name for name in _REQUIRED_BY_SCENARIO.get(ACTIVE_SCENARIO, [])
+            if name not in globals()]
+if _MISSING:
+    raise ValueError(
+        f"ACTIVE_SCENARIO '{ACTIVE_SCENARIO}' is missing required config values: "
+        f"{', '.join(_MISSING)}. Define them in config.py."
+    )
+
+# =======================================================================
 # 4. DERIVED PARTICLE GENERATION
 # =======================================================================
 NUM_MP_WIDTH = int((MP_WIDTH / DX) * P_PER_CELL_AXIS)   

@@ -4,56 +4,6 @@ import os
 import numpy as np
 import config
 
-# def write_vtk(frame_number, pos, pressure, velocity, output_dir="output"):
-#     """
-#     Exports particle positions, pressure, and velocity to a VTK file.
-#     Automatically scales between 2D and 3D based on config.DIM.
-#     """
-#     if not os.path.exists(output_dir):
-#         os.makedirs(output_dir)
-        
-#     filename = os.path.join(output_dir, f"mpm_fluid_{frame_number:04d}.vtk")
-#     num_particles = len(pos)
-    
-#     with open(filename, 'w') as f:
-#         f.write("# vtk DataFile Version 3.0\n")
-#         f.write("MPM Simulation Data\n")
-#         f.write("ASCII\n")
-#         f.write("DATASET UNSTRUCTURED_GRID\n")
-        
-#         # 1. POSITIONS
-#         f.write(f"POINTS {num_particles} float\n")
-#         if config.DIM == 3:
-#             for i in range(num_particles):
-#                 f.write(f"{pos[i, 0]} {pos[i, 1]} {pos[i, 2]}\n")
-#         else:
-#             for i in range(num_particles):
-#                 f.write(f"{pos[i, 0]} {pos[i, 1]} 0.0\n")
-            
-#         f.write(f"\nCELLS {num_particles} {num_particles * 2}\n")
-#         for i in range(num_particles): f.write(f"1 {i}\n")
-            
-#         f.write(f"\nCELL_TYPES {num_particles}\n")
-#         for i in range(num_particles): f.write("1\n")
-            
-#         # 2. PRESSURE (SCALAR)
-#         f.write(f"\nPOINT_DATA {num_particles}\n")
-#         f.write("SCALARS Pressure float 1\n")
-#         f.write("LOOKUP_TABLE default\n")
-#         for i in range(num_particles):
-#             f.write(f"{pressure[i]}\n")
-        
-#         # 3. VELOCITY (VECTOR)
-#         f.write("VECTORS Velocity float\n")
-#         if config.DIM == 3:
-#             for i in range(num_particles):
-#                 f.write(f"{velocity[i, 0]} {velocity[i, 1]} {velocity[i, 2]}\n")
-#         else:
-#             for i in range(num_particles):
-#                 f.write(f"{velocity[i, 0]} {velocity[i, 1]} 0.0\n")
-
-#     print(f"Exported frame {frame_number} to {filename}")
-
 def write_vtk(frame_number, pos, pressure, velocity, output_dir="output", material=None,
               point_scalars=None, point_vectors=None): # use polyvertex
     """

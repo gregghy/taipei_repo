@@ -1,15 +1,28 @@
-mpm_project/
+eos_v1/
 │
-├── config.py          # Global parameters and simulation settings
+├── config.py                    # Global parameters and simulation settings
+├── main.py                      # Scenario setup, export loop
+│
 ├── core/
-│   ├── particles.py   # Particle data structure (Taichi fields)
-│   └── grid.py        # Grid data structure (Taichi fields)
+│   ├── particles.py             # Particle data structure (Taichi fields)
+│   ├── grid.py                  # Grid data structure (Taichi fields)
+│   ├── functions.py             # Shared B-spline weight/gradient functions
+│   ├── quadtree_grid.py         # 2D quadtree AMR grid (per-level fields)
+│   └── adaptive_particles.py    # Adaptive particle pool (split/merge)
 │
 ├── physics/
-│   ├── materials.py   # Constitutive models (Water, Neo-Hookean, etc.)
-│   └── boundary.py    # Collision objects and grid boundary conditions
+│   ├── constitutive_model.py    # Constitutive models (Water, Bingham, ...)
+│   └── boundary.py              # SDFs, EBC forces, grid boundary conditions
 │
 ├── solver/
-│   └── mpm_step.py    # The core MPM loop (P2G, Grid Update, G2P)
+│   ├── standard_engine.py       # Standard MPM solver (2D/3D, dam break, immersed)
+│   ├── Poiseuille_engine.py     # Periodic channel flow solver
+│   ├── Inflow_engine.py         # Continuous inflow solver (NTU maze geometry)
+│   └── adaptive_engine.py       # Quadtree AMR MPM solver (2D)
 │
-└── main.py            # Scene setup, GUI window, and execution loop
+├── utils/
+│   ├── exporter.py              # VTK writers (particles, boundaries, grids)
+│   └── visualization.py         # Matplotlib plotting helpers
+│
+├── benchmarks/                  # Benchmark experiments and runners
+└── verify_*.py                  # Standalone verification scripts

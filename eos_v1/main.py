@@ -124,16 +124,7 @@ def main():
                 output_dir=output_directory
             )
     elif config.ACTIVE_SCENARIO == "INFLOW":
-        grid_mask = ti.field(dtype=ti.f64, shape=(config.GRID_RES_X, config.GRID_RES_Y))
         write_ntu_wireframe_vtk(output_dir=output_directory)
-        mask_np = grid_mask.to_numpy()
-        geom_file = os.path.join(output_directory, 'geometry_check.vtk')
-        with open(geom_file, 'w') as f:
-            f.write("# vtk DataFile Version 3.0\nNTU Maze Geometry Check\nASCII\nDATASET STRUCTURED_POINTS\n")
-            f.write(f"DIMENSIONS {config.GRID_RES_X} {config.GRID_RES_Y} 1\nORIGIN 0 0 0\n")
-            f.write(f"SPACING {config.DX} {config.DY} 1\nPOINT_DATA {config.GRID_RES_X * config.GRID_RES_Y}\n")
-            f.write("SCALARS SolidWall float 1\nLOOKUP_TABLE default\n")
-            for val in mask_np.flatten(order='F'): f.write(f"{val}\n")
         bnd.compute_all_normals()
         normals_np = bnd.grid_normals.to_numpy()
         write_normals_vtk(output_directory, normals_np)
